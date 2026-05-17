@@ -33,7 +33,8 @@ async def _sse_generator_v2(
     if is_problem:
         rag_chunks = await rag.retrieve_chunks(
             sb=sb, model=embed_model, query=problem_text,
-            grade=grade, chapter=chapter, top_k=settings.rag_top_k
+            grade=grade, chapter=chapter, top_k=settings.rag_top_k,
+            gemini=gemini,
         )
     else:
         rag_chunks = []
