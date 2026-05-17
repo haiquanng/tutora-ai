@@ -68,12 +68,14 @@ async def solve_stream_v2_endpoint(
     sb=Depends(get_supabase),
     embed_model=Depends(get_embed_model)
 ):
-    if request.image_base64:
+    if request.image_url:
+        problem_text = await ocr.extract_from_url(gemini, request.image_url)
+    elif request.image_base64:
         problem_text = await ocr.extract_from_image(gemini, request.image_base64)
     elif request.text:
         problem_text = request.text
     else:
-        raise HTTPException(status_code=400, detail="Cần text hoặc image_base64")
+        raise HTTPException(status_code=400, detail="Cần text, image_url hoặc image_base64")
 
     message_id = request.message_id or str(uuid.uuid4())
     session_id = request.chat_id or str(uuid.uuid4())

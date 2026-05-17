@@ -4,6 +4,7 @@ from typing import Optional, List
 class SolveRequest(BaseModel):
     text: Optional[str] = None
     image_base64: Optional[str] = None
+    image_url: Optional[str] = None
     grade: Optional[str] = None
     chapter: Optional[str] = None
     message_id: Optional[str] = None

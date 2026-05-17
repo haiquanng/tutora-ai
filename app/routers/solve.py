@@ -1,14 +1,12 @@
-import base64
 import json
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from typing import Optional, AsyncGenerator
 from ..models.schemas import SolveRequest, SolveResponse, Step
 from ..services import ocr, classifier, rag, solver, solver_stream, chat_history
 from ..core.dependencies import get_embed_model, get_supabase, get_gemini_client
 from ..core.config import get_settings
-from ..constants.utils import ALLOWED_IMAGE_TYPES
 
 router = APIRouter()
 
@@ -67,12 +65,14 @@ async def solve_endpoint(
     sb=Depends(get_supabase),
     embed_model=Depends(get_embed_model)
 ):
-    if request.image_base64:
+    if request.image_url:
+        problem_text = await ocr.extract_from_url(gemini, request.image_url)
+    elif request.image_base64:
         problem_text = await ocr.extract_from_image(gemini, request.image_base64)
     elif request.text:
         problem_text = request.text
     else:
-        raise HTTPException(status_code=400, detail="Cần text hoặc image_base64")
+        raise HTTPException(status_code=400, detail="Cần text, image_url hoặc image_base64")
 
     return await _build_response(
         problem_text, request.grade, request.chapter,
@@ -80,30 +80,24 @@ async def solve_endpoint(
     )
 
 
-@router.post("/solve/image", response_model=SolveResponse)
-async def solve_image_endpoint(
-    file: UploadFile = File(...),
-    grade: Optional[str] = Form(None),
-    chapter: Optional[str] = Form(None),
-    settings=Depends(get_settings),
-    gemini=Depends(get_gemini_client),
-    sb=Depends(get_supabase),
-    embed_model=Depends(get_embed_model)
-):
-    if file.content_type not in ALLOWED_IMAGE_TYPES:
-        raise HTTPException(status_code=400, detail=f"Chỉ chấp nhận ảnh: {', '.join(ALLOWED_IMAGE_TYPES)}")
-
-    image_bytes = await file.read()
-    if len(image_bytes) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="Ảnh tối đa 10MB")
-
-    image_base64 = base64.b64encode(image_bytes).decode()
-    problem_text = await ocr.extract_from_image(gemini, image_base64)
-
-    return await _build_response(
-        problem_text, grade, chapter,
-        settings, gemini, sb, embed_model
-    )
+# @router.post("/solve/image", response_model=SolveResponse)
+# async def solve_image_endpoint(
+#     file: UploadFile = File(...),
+#     grade: Optional[str] = Form(None),
+#     chapter: Optional[str] = Form(None),
+#     settings=Depends(get_settings),
+#     gemini=Depends(get_gemini_client),
+#     sb=Depends(get_supabase),
+#     embed_model=Depends(get_embed_model)
+# ):
+#     if file.content_type not in ALLOWED_IMAGE_TYPES:
+#         raise HTTPException(status_code=400, detail=f"Chỉ chấp nhận ảnh: {', '.join(ALLOWED_IMAGE_TYPES)}")
+#     image_bytes = await file.read()
+#     if len(image_bytes) > 10 * 1024 * 1024:
+#         raise HTTPException(status_code=400, detail="Ảnh tối đa 10MB")
+#     image_base64 = base64.b64encode(image_bytes).decode()
+#     problem_text = await ocr.extract_from_image(gemini, image_base64)
+#     return await _build_response(problem_text, grade, chapter, settings, gemini, sb, embed_model)
 
 
 async def _sse_generator(
@@ -160,12 +154,14 @@ async def solve_stream_endpoint(
     sb=Depends(get_supabase),
     embed_model=Depends(get_embed_model)
 ):
-    if request.image_base64:
+    if request.image_url:
+        problem_text = await ocr.extract_from_url(gemini, request.image_url)
+    elif request.image_base64:
         problem_text = await ocr.extract_from_image(gemini, request.image_base64)
     elif request.text:
         problem_text = request.text
     else:
-        raise HTTPException(status_code=400, detail="Cần text hoặc image_base64")
+        raise HTTPException(status_code=400, detail="Cần text, image_url hoặc image_base64")
 
     message_id = request.message_id or str(uuid.uuid4())
     session_id = request.chat_id or str(uuid.uuid4())
@@ -184,40 +180,16 @@ async def solve_stream_endpoint(
     )
 
 
-@router.post("/solve/stream/image")
-async def solve_stream_image_endpoint(
-    file: UploadFile = File(...),
-    grade: Optional[str] = Form(None),
-    chapter: Optional[str] = Form(None),
-    message_id: Optional[str] = Form(None),
-    chat_id: Optional[str] = Form(None),
-    settings=Depends(get_settings),
-    gemini=Depends(get_gemini_client),
-    sb=Depends(get_supabase),
-    embed_model=Depends(get_embed_model)
-):
-    if file.content_type not in ALLOWED_IMAGE_TYPES:
-        raise HTTPException(status_code=400, detail=f"Chỉ chấp nhận ảnh: {', '.join(ALLOWED_IMAGE_TYPES)}")
-
-    image_bytes = await file.read()
-    if len(image_bytes) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="Ảnh tối đa 10MB")
-
-    image_base64 = base64.b64encode(image_bytes).decode()
-    problem_text = await ocr.extract_from_image(gemini, image_base64)
-
-    mid = message_id or str(uuid.uuid4())
-    sid = chat_id or str(uuid.uuid4())
-
-    return StreamingResponse(
-        _sse_generator(
-            problem_text, grade, chapter,
-            mid, sid,
-            settings, gemini, sb, embed_model,
-        ),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
+# @router.post("/solve/stream/image")
+# async def solve_stream_image_endpoint(
+#     file: UploadFile = File(...),
+#     grade: Optional[str] = Form(None),
+#     chapter: Optional[str] = Form(None),
+#     message_id: Optional[str] = Form(None),
+#     chat_id: Optional[str] = Form(None),
+#     settings=Depends(get_settings),
+#     gemini=Depends(get_gemini_client),
+#     sb=Depends(get_supabase),
+#     embed_model=Depends(get_embed_model)
+# ):
+#     ...  # dùng /v2/solve/stream với image_base64 thay thế
