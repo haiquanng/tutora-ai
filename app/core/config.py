@@ -8,7 +8,8 @@ class Settings(BaseSettings):
     api_key: str
     docs_username: str = "tutora-ap"
     docs_password: str
-    embed_model: str = "BAAI/bge-m3"
+    # "BAAI/bge-m3" — tốt hơn nhưng ~570MB, dùng khi có VPS riêng
+    embed_model: str = "paraphrase-multilingual-MiniLM-L12-v2"
     rag_top_k: int = 3
     env: str = "development"
 
