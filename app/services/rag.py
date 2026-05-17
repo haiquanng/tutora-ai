@@ -19,7 +19,7 @@ async def retrieve_chunks(
         if not gemini:
             return []
         result = gemini.models.embed_content(
-            model="gemini-embedding-exp-03-07",
+            model="gemini-embedding-2",
             contents=query,
         )
         embedding = result.embeddings[0].values
