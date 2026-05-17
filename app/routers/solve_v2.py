@@ -1,12 +1,13 @@
 import json
 import uuid
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from typing import Optional, AsyncGenerator
 from ..models.schemas import SolveRequest
 from ..services import ocr, classifier, rag, solver_stream_v2, chat_history
 from ..core.dependencies import get_embed_model, get_supabase, get_gemini_client
 from ..core.config import get_settings
+from ..core.limiter import limiter, RATE_LIMIT_PER_MINUTE, RATE_LIMIT_PER_HOUR
 
 router = APIRouter(prefix="/v2")
 
@@ -60,29 +61,32 @@ async def _sse_generator_v2(
     )
 
 
-@router.post("/solve/stream")
+@router.post("/solve")
+@limiter.limit(RATE_LIMIT_PER_MINUTE)
+@limiter.limit(RATE_LIMIT_PER_HOUR)
 async def solve_stream_v2_endpoint(
-    request: SolveRequest,
+    request: Request,
+    body: SolveRequest,
     settings=Depends(get_settings),
     gemini=Depends(get_gemini_client),
     sb=Depends(get_supabase),
     embed_model=Depends(get_embed_model)
 ):
-    if request.image_url:
-        problem_text = await ocr.extract_from_url(gemini, request.image_url)
-    elif request.image_base64:
-        problem_text = await ocr.extract_from_image(gemini, request.image_base64)
-    elif request.text:
-        problem_text = request.text
+    if body.image_url:
+        problem_text = await ocr.extract_from_url(gemini, body.image_url)
+    elif body.image_base64:
+        problem_text = await ocr.extract_from_image(gemini, body.image_base64)
+    elif body.text:
+        problem_text = body.text
     else:
         raise HTTPException(status_code=400, detail="Cần text, image_url hoặc image_base64")
 
-    message_id = request.message_id or str(uuid.uuid4())
-    session_id = request.chat_id or str(uuid.uuid4())
+    message_id = body.message_id or str(uuid.uuid4())
+    session_id = body.chat_id or str(uuid.uuid4())
 
     return StreamingResponse(
         _sse_generator_v2(
-            problem_text, request.grade, request.chapter,
+            problem_text, body.grade, body.chapter,
             message_id, session_id,
             settings, gemini, sb, embed_model,
         ),
