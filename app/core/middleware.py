@@ -39,7 +39,7 @@ def configure_middleware(app: FastAPI) -> None:
                 headers={"WWW-Authenticate": 'Basic realm="Tutora Docs"'},
             )
 
-        if path == "/health":
+        if path in {"/health", "/"}:
             return await call_next(request)
 
         if request.method == "OPTIONS":
