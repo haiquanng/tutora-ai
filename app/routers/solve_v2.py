@@ -23,15 +23,20 @@ async def _sse_generator_v2(
     sb,
     embed_model,
 ) -> AsyncGenerator[str, None]:
+    is_problem = True
     if not grade or not chapter:
         clf = await classifier.classify_problem(gemini, problem_text)
+        is_problem = clf.get("is_problem", True)
         grade = grade or clf.get("grade")
         chapter = chapter or clf.get("chapter")
 
-    rag_chunks = await rag.retrieve_chunks(
-        sb=sb, model=embed_model, query=problem_text,
-        grade=grade, chapter=chapter, top_k=settings.rag_top_k
-    )
+    if is_problem:
+        rag_chunks = await rag.retrieve_chunks(
+            sb=sb, model=embed_model, query=problem_text,
+            grade=grade, chapter=chapter, top_k=settings.rag_top_k
+        )
+    else:
+        rag_chunks = []
 
     history = await chat_history.get_session_messages(sb=sb, session_id=session_id)
 
@@ -49,6 +54,7 @@ async def _sse_generator_v2(
         session_id=session_id,
         rag_chunks=rag_chunks,
         history=history,
+        is_problem=is_problem,
     ):
         if not chunk["done"]:
             full_response.append(chunk["delta"])

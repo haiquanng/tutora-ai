@@ -41,8 +41,11 @@ def build_solve_prompt(
     parts.append(f"[BÀI TOÁN CẦN GIẢI]\n{question}")
     parts.append(f"[FORMAT OUTPUT]\n{SOLVE_SCHEMA}")
 
-    return "\n\n---\n\n".join(parts)
+    return "\n\n".join(parts)
 
+
+CHAT_SYSTEM = """Bạn là Tora — gia sư Toán thân thiện cho học sinh lớp 9-12 Việt Nam.
+Trả lời tự nhiên, ngắn gọn. Nếu được hỏi về toán, hướng dẫn học sinh đưa ra bài toán cụ thể."""
 
 TUTOR_SYSTEM_V2 = """Bạn là Tora — gia sư Toán thân thiện, nhiệt tình cho học sinh lớp 9-12 Việt Nam.
 Chương trình theo SGK Kết Nối Tri Thức.
@@ -78,4 +81,4 @@ def build_solve_prompt_v2(
 
     parts.append(f"[BÀI TOÁN]\n{question}")
 
-    return "\n\n---\n\n".join(parts)
+    return "\n\n".join(parts)

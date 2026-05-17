@@ -42,6 +42,9 @@ def configure_middleware(app: FastAPI) -> None:
         if path == "/health":
             return await call_next(request)
 
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         key = request.headers.get("X-API-Key")
         if not key or not secrets.compare_digest(key, settings.api_key):
             return Response(

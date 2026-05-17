@@ -2,13 +2,15 @@ from google import genai
 from google.genai import types
 import json
 
-CLASSIFY_PROMPT = """Phân tích bài toán và trả về JSON:
+CLASSIFY_PROMPT = """Phân tích input và trả về JSON:
 {
-  "grade": "9/10/11/12/thi_vao_10/thi_thpt",
-  "chapter": "tên chương snake_case theo SGK Kết Nối",
-  "topic": "dai_so/giai_tich/hinh_hoc_phang/hinh_hoc_khong_gian/xac_suat_thong_ke",
+  "is_problem": true/false,
+  "grade": "9/10/11/12/thi_vao_10/thi_thpt hoặc null nếu không phải bài toán",
+  "chapter": "tên chương snake_case theo SGK Kết Nối hoặc null",
+  "topic": "dai_so/giai_tich/hinh_hoc_phang/hinh_hoc_khong_gian/xac_suat_thong_ke hoặc null",
   "confidence": 0.0-1.0
 }
+is_problem = false nếu là câu chào, hỏi thăm, câu hỏi chung không phải bài toán cụ thể.
 CHỈ trả về JSON."""
 
 async def classify_problem(client: genai.Client, problem_text: str) -> dict:
