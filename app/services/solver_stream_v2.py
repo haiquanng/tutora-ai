@@ -2,7 +2,7 @@ import asyncio
 from typing import Optional, List, AsyncGenerator
 from google import genai
 from google.genai import types
-from ..utils.prompt import TUTOR_SYSTEM_V2, build_solve_prompt_v2
+from ..utils.prompt import TUTOR_SYSTEM_V2, CHAT_SYSTEM, build_solve_prompt_v2
 
 
 async def solve_stream_v2(
@@ -12,15 +12,21 @@ async def solve_stream_v2(
     session_id: str,
     rag_chunks: Optional[List[dict]] = None,
     history: Optional[List[dict]] = None,
+    is_problem: bool = True,
 ) -> AsyncGenerator[dict, None]:
     """Stream text tự nhiên theo phong cách gia sư, không JSON."""
-    # Build multi-turn contents: history + câu hỏi hiện tại
     contents = []
     for msg in (history or []):
         role = "user" if msg["role"] == "user" else "model"
         contents.append(types.Content(role=role, parts=[types.Part(text=msg["content"])]))
 
-    current_prompt = build_solve_prompt_v2(question, rag_chunks)
+    if is_problem:
+        current_prompt = build_solve_prompt_v2(question, rag_chunks)
+        system = TUTOR_SYSTEM_V2
+    else:
+        current_prompt = question
+        system = CHAT_SYSTEM
+
     contents.append(types.Content(role="user", parts=[types.Part(text=current_prompt)]))
 
     loop = asyncio.get_event_loop()
@@ -34,7 +40,7 @@ async def solve_stream_v2(
                 config=types.GenerateContentConfig(
                     temperature=0.5,
                     top_p=1,
-                    system_instruction=TUTOR_SYSTEM_V2,
+                    system_instruction=system,
                 ),
             )
             for chunk in response:
