@@ -24,26 +24,28 @@ async def _sse_generator_v2(
     embed_model,
 ) -> AsyncGenerator[str, None]:
     is_problem = True
+    topic: Optional[str] = None
     if not grade or not chapter:
         clf = await classifier.classify_problem(gemini, problem_text)
         is_problem = clf.get("is_problem", True)
         grade = grade or clf.get("grade")
         chapter = chapter or clf.get("chapter")
+        topic = clf.get("topic")
 
     if is_problem:
-        rag_chunks = await rag.retrieve_chunks(
+        rag_chunks, similarity_max = await rag.retrieve_chunks(
             sb=sb, model=embed_model, query=problem_text,
             grade=grade, chapter=chapter, top_k=settings.rag_top_k,
             gemini=gemini,
         )
     else:
-        rag_chunks = []
+        rag_chunks, similarity_max = [], None
 
     history = await chat_history.get_session_messages(sb=sb, session_id=session_id)
 
     await chat_history.save_message(
         sb=sb, session_id=session_id, role="user", content=problem_text,
-        grade=grade, chapter=chapter,
+        grade=grade, chapter=chapter, topic=topic,
     )
 
     full_response: list[str] = []
@@ -64,7 +66,8 @@ async def _sse_generator_v2(
     await chat_history.save_message(
         sb=sb, session_id=session_id, role="assistant",
         content="".join(full_response),
-        grade=grade, chapter=chapter, rag_used=len(rag_chunks) > 0,
+        grade=grade, chapter=chapter, topic=topic,
+        rag_used=len(rag_chunks) > 0, similarity_max=similarity_max,
     )
 
 

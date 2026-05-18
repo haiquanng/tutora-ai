@@ -23,7 +23,7 @@ async def _build_response(
         grade = grade or clf.get("grade")
         chapter = chapter or clf.get("chapter")
 
-    chunks = await rag.retrieve_chunks(
+    chunks, _ = await rag.retrieve_chunks(
         sb=sb, model=embed_model, query=problem_text,
         grade=grade, chapter=chapter, top_k=settings.rag_top_k
     )

@@ -8,7 +8,10 @@ async def save_message(
     content: str,
     grade: str | None = None,
     chapter: str | None = None,
+    topic: str | None = None,
     rag_used: bool = False,
+    similarity_max: float | None = None,
+    subject: str = "toan",
 ) -> None:
     sb.table("chat_messages").insert({
         "session_id": session_id,
@@ -16,7 +19,10 @@ async def save_message(
         "content": content,
         "grade": grade,
         "chapter": chapter,
+        "topic": topic,
         "rag_used": rag_used,
+        "similarity_max": similarity_max,
+        "subject": subject,
     }).execute()
 
 
