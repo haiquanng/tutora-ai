@@ -19,7 +19,8 @@ async def solve(
             temperature=0.3,
             top_p=1,
             response_mime_type="application/json",
-            system_instruction=TUTOR_SYSTEM
+            system_instruction=TUTOR_SYSTEM,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
         )
     )
     raw = response.text.strip()
