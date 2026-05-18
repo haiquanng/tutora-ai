@@ -1,62 +1,77 @@
+import json
+import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
-from typing import Optional
-from ..models.schemas import SolveRequest, SolveResponse, Step
-from ..services import ocr, classifier, rag, solver
+from fastapi.responses import StreamingResponse
+from typing import Optional, AsyncGenerator
+from ..models.schemas import SolveRequest
+from ..services import ocr, classifier, rag, solver_stream, chat_history
 from ..core.dependencies import get_embed_model, get_supabase, get_gemini_client
 from ..core.config import get_settings
 from ..core.limiter import limiter, RATE_LIMIT_PER_MINUTE, RATE_LIMIT_PER_HOUR
 
-router = APIRouter()
+router = APIRouter(prefix="/api/v1")
 
 
-async def _build_response(
+async def _sse_generator(
     problem_text: str,
     grade: Optional[str],
     chapter: Optional[str],
+    message_id: str,
+    session_id: str,
     settings,
     gemini,
     sb,
     embed_model,
-) -> SolveResponse:
+) -> AsyncGenerator[str, None]:
+    is_problem = True
+    topic: Optional[str] = None
     if not grade or not chapter:
         clf = await classifier.classify_problem(gemini, problem_text)
+        is_problem = clf.get("is_problem", True)
         grade = grade or clf.get("grade")
         chapter = chapter or clf.get("chapter")
+        topic = clf.get("topic")
 
-    chunks, _ = await rag.retrieve_chunks(
-        sb=sb, model=embed_model, query=problem_text,
-        grade=grade, chapter=chapter, top_k=settings.rag_top_k
-    )
-
-    solution = await solver.solve(
-        client=gemini, question=problem_text, rag_chunks=chunks
-    )
-
-    steps = [
-        Step(
-            step=s.get("step", i + 1),
-            title=s.get("title", ""),
-            content=s.get("content", ""),
-            formula=s.get("formula")
+    if is_problem:
+        rag_chunks, similarity_max = await rag.retrieve_chunks(
+            sb=sb, model=embed_model, query=problem_text,
+            grade=grade, chapter=chapter, top_k=settings.rag_top_k,
+            gemini=gemini,
         )
-        for i, s in enumerate(solution.get("steps", []))
-    ]
+    else:
+        rag_chunks, similarity_max = [], None
 
-    return SolveResponse(
-        problem_extracted=problem_text,
-        grade=grade,
-        chapter=chapter,
-        steps=steps,
-        final_answer=solution.get("final_answer", ""),
-        hint=solution.get("hint", ""),
-        common_mistakes=solution.get("common_mistakes", []),
-        verified=None,
-        confidence=float(solution.get("confidence", 0.9)),
-        rag_used=len(chunks) > 0
+    history = await chat_history.get_session_messages(sb=sb, session_id=session_id)
+
+    await chat_history.save_message(
+        sb=sb, session_id=session_id, role="user", content=problem_text,
+        grade=grade, chapter=chapter, topic=topic,
+    )
+
+    full_response: list[str] = []
+
+    async for chunk in solver_stream.solve_stream(
+        client=gemini,
+        question=problem_text,
+        message_id=message_id,
+        session_id=session_id,
+        rag_chunks=rag_chunks,
+        history=history,
+        is_problem=is_problem,
+    ):
+        if not chunk["done"]:
+            full_response.append(chunk["delta"])
+        yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+    await chat_history.save_message(
+        sb=sb, session_id=session_id, role="assistant",
+        content="".join(full_response),
+        grade=grade, chapter=chapter, topic=topic,
+        rag_used=len(rag_chunks) > 0, similarity_max=similarity_max,
     )
 
 
-@router.post("/solve", response_model=SolveResponse)
+@router.post("/solve")
 @limiter.limit(RATE_LIMIT_PER_MINUTE)
 @limiter.limit(RATE_LIMIT_PER_HOUR)
 async def solve_endpoint(
@@ -76,7 +91,18 @@ async def solve_endpoint(
     else:
         raise HTTPException(status_code=400, detail="Cần text, image_url hoặc image_base64")
 
-    return await _build_response(
-        problem_text, body.grade, body.chapter,
-        settings, gemini, sb, embed_model
+    message_id = body.message_id or str(uuid.uuid4())
+    session_id = body.chat_id or str(uuid.uuid4())
+
+    return StreamingResponse(
+        _sse_generator(
+            problem_text, body.grade, body.chapter,
+            message_id, session_id,
+            settings, gemini, sb, embed_model,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )

@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
-from .routers import health, solve, solve_v2
+from .routers import health, solve
 from .core.middleware import configure_middleware
 from .core.openapi import configure_openapi
 from .core.limiter import limiter
@@ -29,5 +29,4 @@ configure_middleware(app)
 configure_openapi(app)
 
 app.include_router(health.router, tags=["health"])
-app.include_router(solve.router, tags=["solve-v1"])
-app.include_router(solve_v2.router, tags=["solve-v2"])
+app.include_router(solve.router, tags=["solve"])

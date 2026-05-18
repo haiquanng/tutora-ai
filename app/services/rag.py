@@ -36,7 +36,6 @@ async def retrieve_chunks(
             top_score = max(c.get("similarity", 0) for c in filtered)
             return filtered, top_score
 
-        # Không có chunk nào đạt threshold — thử lại không filter chapter
         if chapter:
             fallback = sb.rpc("match_rag_chunks", {
                 "query_embedding": embedding,
