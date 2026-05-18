@@ -41,6 +41,7 @@ async def solve_stream_v2(
                     temperature=0.5,
                     top_p=1,
                     system_instruction=system,
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
                 ),
             )
             for chunk in response:

@@ -44,3 +44,5 @@ supabase/
 # Tests
 tests/
 
+# Scripts
+scripts/
