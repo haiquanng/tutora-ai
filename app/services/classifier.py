@@ -4,6 +4,7 @@ import json
 
 CLASSIFY_PROMPT = """Phân tích input và trả về JSON:
 {
+  "is_math_related": true/false,
   "is_problem": true/false,
   "grade": "9/10/11/12/thi_vao_10/thi_thpt hoặc null",
   "chapter": "Lấy ĐÚNG TÊN từ danh sách bên dưới, hoặc null nếu không khớp",
@@ -23,14 +24,17 @@ phuong_phap_toa_do_trong_khong_gian, phuong_trinh_va_he_phuong_trinh_bac_nhat_ha
 so_phuc, tich_phan, to_hop_xac_suat, ung_dung_dao_ham,
 ung_dung_dao_ham_de_khao_sat_va_ve_do_thi_ham_so, ung_dung_tich_phan, vecto, xac_suat_co_dieu_kien
 
-is_problem = false nếu là câu chào, hỏi thăm, không phải bài toán cụ thể.
+ĐỊNH NGHĨA:
+- is_math_related = true nếu input liên quan đến Toán học (bài toán, câu hỏi về toán, chào hỏi thông thường).
+- is_math_related = false nếu input hoàn toàn ngoài phạm vi Toán (y học, lịch sử, vũ khí, code, nấu ăn, v.v.).
+- is_problem = false nếu là câu chào, hỏi thăm, không phải bài toán cụ thể.
 CHỈ trả về JSON."""
 
 async def classify_problem(client: genai.Client, problem_text: str) -> dict:
     """Phân loại bài toán → grade, chapter."""
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-2.5-flash-lite",
             contents=f"{CLASSIFY_PROMPT}\n\nBài toán: {problem_text}",
             config=types.GenerateContentConfig(
                 temperature=0.1,
@@ -41,4 +45,4 @@ async def classify_problem(client: genai.Client, problem_text: str) -> dict:
         return json.loads(response.text)
     except Exception as e:
         print(f"Classifier error: {e}")
-        return {"grade": None, "chapter": None, "topic": None, "confidence": 0.0}
+        return {"is_math_related": True, "is_problem": True, "grade": None, "chapter": None, "topic": None, "confidence": 0.0}
