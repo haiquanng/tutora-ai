@@ -35,7 +35,7 @@ async def solve_stream(
     def _stream_in_thread():
         try:
             response = client.models.generate_content_stream(
-                model="gemini-2.5-flash",
+                model="gemini-3.5-flash",
                 contents=contents,
                 config=types.GenerateContentConfig(
                     temperature=0.5,

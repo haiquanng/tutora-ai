@@ -12,6 +12,9 @@ from ..core.limiter import limiter, RATE_LIMIT_PER_MINUTE, RATE_LIMIT_PER_HOUR
 router = APIRouter(prefix="/api/v1")
 
 
+_OFF_TOPIC_REPLY = "Mình chỉ có thể giúp bạn với các bài toán Toán lớp 9–12 thôi nhé. Bạn có bài toán nào cần giải không?"
+
+
 async def _sse_generator(
     problem_text: str,
     grade: Optional[str],
@@ -25,12 +28,23 @@ async def _sse_generator(
 ) -> AsyncGenerator[str, None]:
     is_problem = True
     topic: Optional[str] = None
-    if not grade or not chapter:
-        clf = await classifier.classify_problem(gemini, problem_text)
-        is_problem = clf.get("is_problem", True)
-        grade = grade or clf.get("grade")
-        chapter = chapter or clf.get("chapter")
-        topic = clf.get("topic")
+    clf = await classifier.classify_problem(gemini, problem_text)
+    is_math_related = clf.get("is_math_related", True)
+    is_problem = clf.get("is_problem", True)
+    grade = grade or clf.get("grade")
+    chapter = chapter or clf.get("chapter")
+    topic = clf.get("topic")
+
+    if not is_math_related:
+        await chat_history.save_message(
+            sb=sb, session_id=session_id, role="user", content=problem_text,
+        )
+        yield f"data: {json.dumps({'id': message_id, 'session_id': session_id, 'delta': _OFF_TOPIC_REPLY, 'done': False}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'id': message_id, 'session_id': session_id, 'delta': '', 'done': True}, ensure_ascii=False)}\n\n"
+        await chat_history.save_message(
+            sb=sb, session_id=session_id, role="assistant", content=_OFF_TOPIC_REPLY,
+        )
+        return
 
     if is_problem:
         rag_chunks, similarity_max = await rag.retrieve_chunks(
