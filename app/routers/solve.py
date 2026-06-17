@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from typing import Optional, AsyncGenerator
 from ..models.schemas import SolveRequest
-from ..services import ocr, classifier, rag, solver_stream, chat_history
+from ..services import ocr, classifier, rag, solver_stream
 from ..core.dependencies import get_embed_model, get_supabase, get_gemini_client
 from ..core.config import get_settings
 from ..core.limiter import limiter, RATE_LIMIT_PER_MINUTE, RATE_LIMIT_PER_HOUR
@@ -21,6 +21,7 @@ async def _sse_generator(
     chapter: Optional[str],
     message_id: str,
     session_id: str,
+    history: list[dict],
     settings,
     gemini,
     sb,
@@ -36,14 +37,8 @@ async def _sse_generator(
     topic = clf.get("topic")
 
     if not is_math_related:
-        await chat_history.save_message(
-            sb=sb, session_id=session_id, role="user", content=problem_text,
-        )
         yield f"data: {json.dumps({'id': message_id, 'session_id': session_id, 'delta': _OFF_TOPIC_REPLY, 'done': False}, ensure_ascii=False)}\n\n"
         yield f"data: {json.dumps({'id': message_id, 'session_id': session_id, 'delta': '', 'done': True}, ensure_ascii=False)}\n\n"
-        await chat_history.save_message(
-            sb=sb, session_id=session_id, role="assistant", content=_OFF_TOPIC_REPLY,
-        )
         return
 
     if is_problem:
@@ -55,15 +50,6 @@ async def _sse_generator(
     else:
         rag_chunks, similarity_max = [], None
 
-    history = await chat_history.get_session_messages(sb=sb, session_id=session_id)
-
-    await chat_history.save_message(
-        sb=sb, session_id=session_id, role="user", content=problem_text,
-        grade=grade, chapter=chapter, topic=topic,
-    )
-
-    full_response: list[str] = []
-
     async for chunk in solver_stream.solve_stream(
         client=gemini,
         question=problem_text,
@@ -73,16 +59,7 @@ async def _sse_generator(
         history=history,
         is_problem=is_problem,
     ):
-        if not chunk["done"]:
-            full_response.append(chunk["delta"])
         yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-
-    await chat_history.save_message(
-        sb=sb, session_id=session_id, role="assistant",
-        content="".join(full_response),
-        grade=grade, chapter=chapter, topic=topic,
-        rag_used=len(rag_chunks) > 0, similarity_max=similarity_max,
-    )
 
 
 @router.post("/solve")
@@ -107,11 +84,12 @@ async def solve_endpoint(
 
     message_id = body.message_id or str(uuid.uuid4())
     session_id = body.chat_id or str(uuid.uuid4())
+    history = [m.model_dump() for m in body.history]
 
     return StreamingResponse(
         _sse_generator(
             problem_text, body.grade, body.chapter,
-            message_id, session_id,
+            message_id, session_id, history,
             settings, gemini, sb, embed_model,
         ),
         media_type="text/event-stream",

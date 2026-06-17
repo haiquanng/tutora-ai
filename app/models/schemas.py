@@ -1,6 +1,10 @@
 from pydantic import BaseModel
 from typing import Optional, List
 
+class HistoryMessage(BaseModel):
+    role: str   # "user" | "assistant"
+    content: str
+
 class SolveRequest(BaseModel):
     text: Optional[str] = None
     image_base64: Optional[str] = None
@@ -9,6 +13,7 @@ class SolveRequest(BaseModel):
     chapter: Optional[str] = None
     message_id: Optional[str] = None
     chat_id: Optional[str] = None
+    history: List[HistoryMessage] = []
 
 class StreamChunk(BaseModel):
     id: str
