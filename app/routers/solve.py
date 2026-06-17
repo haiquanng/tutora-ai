@@ -27,39 +27,40 @@ async def _sse_generator(
     sb,
     embed_model,
 ) -> AsyncGenerator[str, None]:
-    is_problem = True
-    topic: Optional[str] = None
-    clf = await classifier.classify_problem(gemini, problem_text)
-    is_math_related = clf.get("is_math_related", True)
-    is_problem = clf.get("is_problem", True)
-    grade = grade or clf.get("grade")
-    chapter = chapter or clf.get("chapter")
-    topic = clf.get("topic")
+    try:
+        clf = await classifier.classify_problem(gemini, problem_text)
+        is_math_related = clf.get("is_math_related", True)
+        is_problem = clf.get("is_problem", True)
+        grade = grade or clf.get("grade")
+        chapter = chapter or clf.get("chapter")
 
-    if not is_math_related:
-        yield f"data: {json.dumps({'id': message_id, 'session_id': session_id, 'delta': _OFF_TOPIC_REPLY, 'done': False}, ensure_ascii=False)}\n\n"
-        yield f"data: {json.dumps({'id': message_id, 'session_id': session_id, 'delta': '', 'done': True}, ensure_ascii=False)}\n\n"
-        return
+        if not is_math_related:
+            yield f"data: {json.dumps({'id': message_id, 'session_id': session_id, 'delta': _OFF_TOPIC_REPLY, 'done': False}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'id': message_id, 'session_id': session_id, 'delta': '', 'done': True}, ensure_ascii=False)}\n\n"
+            return
 
-    if is_problem:
-        rag_chunks, similarity_max = await rag.retrieve_chunks(
-            sb=sb, model=embed_model, query=problem_text,
-            grade=grade, chapter=chapter, top_k=settings.rag_top_k,
-            gemini=gemini,
-        )
-    else:
-        rag_chunks, similarity_max = [], None
+        if is_problem:
+            rag_chunks, _ = await rag.retrieve_chunks(
+                sb=sb, model=embed_model, query=problem_text,
+                grade=grade, chapter=chapter, top_k=settings.rag_top_k,
+                gemini=gemini,
+            )
+        else:
+            rag_chunks, _ = [], None
 
-    async for chunk in solver_stream.solve_stream(
-        client=gemini,
-        question=problem_text,
-        message_id=message_id,
-        session_id=session_id,
-        rag_chunks=rag_chunks,
-        history=history,
-        is_problem=is_problem,
-    ):
-        yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+        async for chunk in solver_stream.solve_stream(
+            client=gemini,
+            question=problem_text,
+            message_id=message_id,
+            session_id=session_id,
+            rag_chunks=rag_chunks,
+            history=history,
+            is_problem=is_problem,
+        ):
+            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+    except Exception as e:
+        yield f"data: {json.dumps({'id': message_id, 'session_id': session_id, 'delta': f'[ERROR] {type(e).__name__}: {e}', 'done': True}, ensure_ascii=False)}\n\n"
 
 
 @router.post("/solve")
