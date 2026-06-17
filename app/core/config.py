@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     # "BAAI/bge-m3" — tốt hơn nhưng ~570MB, dùng khi có VPS riêng
     embed_model: str = "paraphrase-multilingual-MiniLM-L12-v2"
     rag_top_k: int = 3
+    rag_embedding_dim: int = 768
     env: str = "development"
 
     class Config:

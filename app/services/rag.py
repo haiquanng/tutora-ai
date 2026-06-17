@@ -2,6 +2,9 @@ from typing import Optional, List, Tuple
 # from sentence_transformers import SentenceTransformer
 from supabase import Client
 from google import genai
+from app.core.config import get_settings
+
+_settings = get_settings()
 
 async def retrieve_chunks(
     sb: Client,
@@ -19,6 +22,7 @@ async def retrieve_chunks(
         result = gemini.models.embed_content(
             model="gemini-embedding-2",
             contents=query,
+            config={"output_dimensionality": _settings.rag_embedding_dim},
         )
         embedding = result.embeddings[0].values
 
