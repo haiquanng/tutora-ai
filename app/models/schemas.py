@@ -1,9 +1,41 @@
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Any, Dict
 
 class HistoryMessage(BaseModel):
     role: str   # "user" | "assistant"
     content: str
+
+class TutorChatContext(BaseModel):
+    subject_id: Optional[int] = None
+    grade_level_id: Optional[int] = None
+    teaching_mode: Optional[str] = None
+    city: Optional[str] = None
+
+class TutorChatFilters(BaseModel):
+    min_rate: Optional[float] = None
+    max_rate: Optional[float] = None
+    tutor_gender: Optional[str] = None  # "male" | "female" | null -- cập nhật sang 0,1,2 sau
+    # LLM được phép đổi/thêm môn giữa chat → override subject_id của context.
+    subject_id: Optional[int] = None
+    # Số gia sư PH muốn xem ("cần 1-2 người" → 2). null = mặc định.
+    desired_count: Optional[int] = None
+
+class TutorChatRequest(BaseModel):
+    history: List[HistoryMessage] = []
+    message: str = ""
+    context: TutorChatContext = TutorChatContext()
+    # Filter đã tích luỹ qua các turn trước (FE giữ & gửi kèm) — service merge,
+    # không reset. Nhờ vậy môn/giá đang chọn được duy trì khi PH không nhắc lại.
+    current_filters: Optional[TutorChatFilters] = None
+
+class TutorChatResponse(BaseModel):
+    reply: str
+    tutors: List[Dict[str, Any]] = []   # proxy nguyên shape từ .NET recommend
+    filters: TutorChatFilters = TutorChatFilters()
+    ai_ranked: bool = False
+    # Khi đổi môn: AI hỏi lại xác nhận ngữ cảnh, KHÔNG tìm gia sư turn đó.
+    awaiting_confirmation: bool = False
+    suggestions: List[str] = []
 
 class SolveRequest(BaseModel):
     text: Optional[str] = None
