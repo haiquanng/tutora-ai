@@ -5,6 +5,8 @@ class Settings(BaseSettings):
     gemini_api_key: str
     supabase_url: str
     supabase_key: str
+    supabase_dev_url: str = ""
+    supabase_dev_key: str = ""
     api_key: str
     docs_username: str = "tutora-ap"
     docs_password: str
