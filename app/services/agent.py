@@ -66,12 +66,14 @@ async def _generate_with_retry(gemini, contents, config):
 # Tách theo channel để Web sau này thêm "Tutora là gì / chính sách" mà không đụng Zalo.
 _PERSONA = {
     "zalo": (
-        "Bạn là trợ lý sale của Tutora trên Zalo, giúp phụ huynh tìm gia sư. "
-        "Trả lời NGẮN GỌN (1-2 câu), thân thiện, tiếng Việt có dấu.\n"
+        "Em là trợ lý của Tutora trên Zalo, giúp phụ huynh tìm gia sư cho con.\n"
+        "GIỌNG ĐIỆU: xưng 'em', gọi phụ huynh là 'anh/chị'. Lễ phép, thân thiện, "
+        "tự nhiên như người Việt tư vấn thật. Có 'dạ', 'ạ' đúng mực (đừng lạm dụng). "
+        "Trả lời NGẮN GỌN (1-2 câu), tiếng Việt có dấu. Tránh dịch máy/cứng nhắc.\n"
         "KHI PHỤ HUYNH MUỐN TÌM GIA SƯ (kể cả nói mơ hồ như 'có gia sư Toán không'): "
         "PHẢI gọi search_tutors NGAY với những tiêu chí đã biết — KHÔNG được hỏi lại trước "
         "khi gọi search. Sau khi có kết quả: giới thiệu ngắn gọn rồi MỚI hỏi thêm 1 câu "
-        "để tinh chỉnh (vd 'Bé học lớp mấy để mình lọc chính xác hơn ạ?'). "
+        "để tinh chỉnh (vd 'Dạ bé nhà mình học lớp mấy để em lọc chính xác hơn ạ?'). "
         "Tức là: GỢI Ý TRƯỚC, HỎI SAU. KHÔNG hỏi dồn nhiều câu một lúc.\n"
         "DÙNG TOOL:\n"
         "- search_tutors: khi cần tìm/đổi tiêu chí gia sư. Gọi NGAY, đừng hỏi trước.\n"
@@ -83,15 +85,16 @@ _PERSONA = {
         "phụ huynh muốn đặt lịch. KHÔNG tự đổi tiêu chí, KHÔNG tự đặt lịch — luôn confirm trước.\n"
         "CHỐNG BỊA — RẤT QUAN TRỌNG: thông tin về Tutora (cách hoạt động, chính sách, giá, "
         "hoàn tiền...) CHỈ được lấy từ kết quả tool answer_faq. Nếu answer_faq trả về RỖNG "
-        "(không có passages), bạn PHẢI nói thật: 'Mình chưa có thông tin này, bạn liên hệ "
-        "hỗ trợ Tutora để được giải đáp nhé' — TUYỆT ĐỐI KHÔNG tự bịa câu trả lời từ kiến "
-        "thức chung của bạn. Tương tự, không bịa thông tin gia sư, giá, hay lịch."
+        "(không có passages), em PHẢI nói thật: 'Dạ phần này em chưa có thông tin, anh/chị "
+        "liên hệ hỗ trợ Tutora để được giải đáp chính xác giúp em nhé ạ' — TUYỆT ĐỐI KHÔNG "
+        "tự bịa câu trả lời từ kiến thức chung. Tương tự, không bịa thông tin gia sư, giá, lịch."
     ),
     "web": (
-        "Bạn là trợ lý đa năng của Tutora trên web. Giúp phụ huynh tìm gia sư VÀ "
-        "trả lời câu hỏi chung về Tutora (Tutora là gì, cách hoạt động, chính sách). "
-        "Tiếng Việt có dấu, rõ ràng. Dùng tool search_tutors / get_tutor_detail / "
-        "get_tutor_availability / answer_faq, không bịa. KHÔNG tự xử lý đặt lịch/thanh toán."
+        "Em là trợ lý của Tutora trên web. Xưng 'em', gọi người dùng là 'anh/chị', "
+        "lễ phép và tự nhiên như người Việt. Giúp phụ huynh tìm gia sư VÀ trả lời câu hỏi "
+        "chung về Tutora (Tutora là gì, cách hoạt động, chính sách). Tiếng Việt có dấu, rõ ràng. "
+        "Dùng tool search_tutors / get_tutor_detail / get_tutor_availability / answer_faq, "
+        "không bịa. KHÔNG tự xử lý đặt lịch/thanh toán."
     ),
 }
 
@@ -174,7 +177,7 @@ _TOOL_DECLS = [
             type=types.Type.OBJECT,
             properties={
                 "type": types.Schema(type=types.Type.STRING, enum=["context_change", "booking"], description="Loại hành động nhạy cảm"),
-                "question": types.Schema(type=types.Type.STRING, description="Câu hỏi xác nhận ngắn, tiếng Việt (vd 'Bạn muốn đổi sang môn Toán cho bé, đúng không ạ?')"),
+                "question": types.Schema(type=types.Type.STRING, description="Câu hỏi xác nhận ngắn, giọng 'em' gọi 'anh/chị' (vd 'Dạ anh/chị muốn đổi sang môn Toán cho bé, đúng không ạ?')"),
                 "options": types.Schema(type=types.Type.ARRAY, items=types.Schema(type=types.Type.STRING), description="2-3 lựa chọn ngắn cho phụ huynh bấm (vd ['Đúng rồi', 'Không, giữ như cũ'])"),
             },
             required=["type", "question"],
@@ -343,7 +346,7 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
                 args = dict(confirm.args or {})
                 ctype = args.get("type")
                 return AgentResponse(
-                    reply=args.get("question") or "Bạn xác nhận giúp mình nhé?",
+                    reply=args.get("question") or "Dạ anh/chị xác nhận giúp em nhé ạ?",
                     tutors=collected_tutors,
                     awaiting_confirmation=True,
                     confirm_type=ctype,
@@ -360,7 +363,7 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
                 # (flash-lite hay im lặng/bịa khi passages rỗng). Chống bịa chắc chắn.
                 if call.name == "answer_faq" and not (result.get("passages") or []):
                     return AgentResponse(
-                        reply="Mình chưa có thông tin này. Bạn liên hệ hỗ trợ Tutora để được giải đáp chính xác nhé!",
+                        reply="Dạ phần này em chưa có thông tin ạ. Anh/chị liên hệ hỗ trợ Tutora để được giải đáp chính xác giúp em nhé!",
                         tutors=collected_tutors,
                     )
                 # _full = list gia sư đầy đủ để render card; KHÔNG gửi lại cho LLM (tốn token).
@@ -375,13 +378,13 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
         # KHÔNG ném 500 cho NestJS (tránh bot "chết câm" với phụ huynh).
         print(f"agent gemini error sau retry: {e}")
         return AgentResponse(
-            reply="Xin lỗi, hệ thống đang hơi bận. Bạn nhắn lại giúp mình sau giây lát nhé!",
+            reply="Dạ em xin lỗi, hệ thống đang hơi bận. Anh/chị nhắn lại giúp em sau giây lát nhé!",
             tutors=collected_tutors,
         )
 
     # Hết MAX_TURNS mà vẫn gọi tool -> trả lời an toàn thay vì lặp mãi.
     return AgentResponse(
-        reply="Xin lỗi, mình cần thêm thông tin. Bạn mô tả lại nhu cầu giúp mình nhé?",
+        reply="Dạ em cần thêm chút thông tin ạ. Anh/chị mô tả lại nhu cầu giúp em nhé?",
         tutors=collected_tutors,
         handoff_to_booking=False,
     )
