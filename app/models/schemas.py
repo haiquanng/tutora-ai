@@ -37,6 +37,31 @@ class TutorChatResponse(BaseModel):
     awaiting_confirmation: bool = False
     suggestions: List[str] = []
 
+class ShownTutor(BaseModel):
+    # Gia sư đã gợi ý ở turn trước, để agent hiểu "gia sư A" trong list là ai.
+    tutor_id: str
+    name: Optional[str] = None
+
+class AgentRequest(BaseModel):
+    # Stateless: bên gọi (NestJS/Web) giữ history, gửi kèm mỗi request.
+    history: List[HistoryMessage] = []
+    message: str = ""
+    channel: str = "zalo"   # "zalo" (sale) | "web" (đa năng) -> chọn persona
+    context: TutorChatContext = TutorChatContext()
+    # List gia sư vừa gợi ý (NestJS giữ) -> agent trả lời được "chi tiết gia sư A".
+    shown_tutors: List[ShownTutor] = []
+
+class AgentResponse(BaseModel):
+    reply: str
+    tutors: List[Dict[str, Any]] = []        # proxy shape từ .NET recommend; render card riêng
+    # Cờ bàn giao sang deterministic booking flow (NestJS xử lý, agent KHÔNG tự đặt lịch).
+    handoff_to_booking: bool = False
+    # Khi agent gặp điểm nhạy cảm (đổi lớp/bé/môn, hoặc ý định booking) -> hỏi xác nhận,
+    # CHƯA hành động. NestJS render nút từ suggestions, chờ phụ huynh bấm.
+    awaiting_confirmation: bool = False
+    confirm_type: Optional[str] = None       # "context_change" | "booking"
+    suggestions: List[str] = []              # các lựa chọn ngắn cho phụ huynh bấm
+
 class SolveRequest(BaseModel):
     text: Optional[str] = None
     image_base64: Optional[str] = None

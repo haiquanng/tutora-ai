@@ -75,6 +75,11 @@ QUY TẮC:
      ôn thi như trước, hay là bé khác / mục tiêu khác ạ?"
   -> suggestions: 2-3 lựa chọn ngắn cho PH bấm, vd
      ["Vẫn bé đó, cùng mục tiêu", "Bé khác", "Mục tiêu khác"].
+- QUAN TRỌNG — TRÁNH HỎI LẠI 2 LẦN: Nếu tin nhắn assistant GẦN NHẤT trong hội thoại
+  ĐÃ là câu hỏi xác nhận đổi môn (kiểu "...vẫn bé đó hay bé khác?"), thì tin nhắn mới
+  của PH chính là CÂU TRẢ LỜI xác nhận (vd "vẫn bé đó", "bé khác", "cùng mục tiêu").
+  -> action = "search" (KHÔNG confirm lại), giữ subject_id môn đã chọn, suggestions = [].
+  Tìm gia sư luôn.
 - Nếu KHÔNG đổi môn (giữ "{current_subject}") -> action = "search", subject_id = null,
   suggestions = [].
 - Field nào tin mới không nhắc tới -> để null (hệ thống tự giữ giá trị cũ trong "Filter hiện tại").
@@ -142,12 +147,12 @@ async def _fetch_candidates(context, filters: TutorChatFilters, query: str) -> d
 
 def _merge_filters(prev: TutorChatFilters, new: TutorChatFilters) -> TutorChatFilters:
     """Tích luỹ state: giữ giá trị cũ, chỉ override field LLM vừa trích (non-null).
-    desired_count KHÔNG dính: chỉ áp cho đúng turn PH nêu, turn sau về mặc định."""
+    Mọi field (gồm desired_count) đều DÍNH qua các turn tới khi PH đổi ý —
+    PH nói '2 người' thì các turn sau vẫn ~2 cho tới khi nêu số khác."""
     merged = prev.model_dump()
     for k, v in new.model_dump().items():
         if v is not None:
             merged[k] = v
-    merged["desired_count"] = new.desired_count  # không kế thừa
     return TutorChatFilters(**merged)
 
 

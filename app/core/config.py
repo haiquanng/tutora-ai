@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     rag_embedding_dim: int = 768
     env: str = "development"
     # .NET BE — nguồn candidate cho tutor-chat (filter SQL + profile đầy đủ)
-    dotnet_be_url: str = "https://tutora-dev.onrender.com"
+    dotnet_be_url: str = "https://tutora-dev.up.railway.app"
 
     class Config:
         env_file = ".env"

@@ -1,0 +1,387 @@
+"""
+Agent hội thoại Tutora — MỘT core dùng chung cho Zalo (sale) và Web (đa năng).
+
+KIẾN TRÚC (đọc trước khi sửa):
+- LLM (Gemini) lo HỘI THOẠI + Ý ĐỊNH: hiểu phụ huynh, quyết định gọi tool nào,
+  diễn đạt tiếng Việt. KHÔNG sinh quyết định nghiệp vụ/tiền bạc.
+- TOOL lo phần DETERMINISTIC: search gia sư (Ranking Core), FAQ (RAG). Mỗi tool
+  chỉ bọc code đã có sẵn — agent không "biết" cách tính ranking hay truy vấn DB.
+- BOOKING/PAYMENT: KHÔNG nằm trong agent. Khi phụ huynh muốn đặt lịch, agent set
+  cờ handoff_to_booking → NestJS chuyển sang deterministic booking flow. Tiền bạc
+  là nhị phân đúng/sai → không để LLM tự quyết. (Xem nhóm tool GĐ2 ở cuối file.)
+
+STATELESS: bên gọi (NestJS/Web) giữ history, gửi kèm mỗi request. Giống tutor_chat.
+
+Đây là SKELETON để review cấu trúc. Phần đánh dấu [STUB] cần hoàn thiện.
+"""
+from __future__ import annotations
+
+import asyncio
+
+import httpx
+from google import genai
+from google.genai import types
+from google.genai import errors as genai_errors
+
+from ..core.config import get_settings
+from ..core.dependencies import get_gemini_client, get_supabase
+from ..models.schemas import AgentRequest, AgentResponse, TutorChatFilters
+from .tutor_chat import _fetch_candidates          # tái dùng nguyên si: gọi .NET /recommend
+from .rag import retrieve_chunks
+
+_settings = get_settings()
+
+# gemini-2.5-flash-lite: rẻ nhất, function-calling đủ tốt cho luồng sale.
+_MODEL = "gemini-2.5-flash-lite"
+_MAX_TURNS = 5  # guard: chặn vòng lặp tool vô hạn (agent gọi tool mãi không trả lời).
+
+# Retry khi Gemini lỗi TẠM THỜI (503 quá tải / 429 / timeout) — lỗi phía Google,
+# không liên quan quota mình. Backoff tăng dần; hết retry -> raise để fallback graceful.
+_RETRY_DELAYS = [0.8, 2.0]   # 2 lần retry (tổng 3 lần thử)
+_RETRYABLE = (genai_errors.ServerError, genai_errors.APIError)
+
+
+async def _generate_with_retry(gemini, contents, config):
+    """Gọi generate_content (sync) trong thread + retry lỗi tạm thời của Gemini."""
+    last_exc = None
+    for attempt in range(len(_RETRY_DELAYS) + 1):
+        try:
+            # generate_content là sync -> chạy trong thread để không block event loop.
+            return await asyncio.to_thread(
+                gemini.models.generate_content, model=_MODEL, contents=contents, config=config,
+            )
+        except _RETRYABLE as e:
+            code = getattr(e, "code", None)
+            # Chỉ retry lỗi tạm thời (5xx, 429). Lỗi 4xx khác (bad request) -> raise ngay.
+            if code is not None and code < 500 and code != 429:
+                raise
+            last_exc = e
+            if attempt < len(_RETRY_DELAYS):
+                await asyncio.sleep(_RETRY_DELAYS[attempt])
+    raise last_exc
+
+
+# ───────────────────────── PERSONA / SYSTEM PROMPT ─────────────────────────
+# Một core, hai persona: Zalo = sale ngắn gọn; Web = trợ lý đa năng.
+# Tách theo channel để Web sau này thêm "Tutora là gì / chính sách" mà không đụng Zalo.
+_PERSONA = {
+    "zalo": (
+        "Bạn là trợ lý sale của Tutora trên Zalo, giúp phụ huynh tìm gia sư. "
+        "Trả lời NGẮN GỌN (1-2 câu), thân thiện, tiếng Việt có dấu.\n"
+        "KHI PHỤ HUYNH MUỐN TÌM GIA SƯ (kể cả nói mơ hồ như 'có gia sư Toán không'): "
+        "PHẢI gọi search_tutors NGAY với những tiêu chí đã biết — KHÔNG được hỏi lại trước "
+        "khi gọi search. Sau khi có kết quả: giới thiệu ngắn gọn rồi MỚI hỏi thêm 1 câu "
+        "để tinh chỉnh (vd 'Bé học lớp mấy để mình lọc chính xác hơn ạ?'). "
+        "Tức là: GỢI Ý TRƯỚC, HỎI SAU. KHÔNG hỏi dồn nhiều câu một lúc.\n"
+        "DÙNG TOOL:\n"
+        "- search_tutors: khi cần tìm/đổi tiêu chí gia sư. Gọi NGAY, đừng hỏi trước.\n"
+        "- get_tutor_detail: khi hỏi sâu về MỘT gia sư trong danh sách đã gợi ý "
+        "(bằng cấp, kinh nghiệm, phong cách dạy).\n"
+        "- get_tutor_availability: khi hỏi gia sư rảnh giờ nào / lịch trống.\n"
+        "- answer_faq: khi hỏi về Tutora (cách hoạt động, chính sách, giá chung).\n"
+        "- confirm_action: GỌI TRƯỚC khi đổi ngữ cảnh (đổi môn/lớp/bé/mục tiêu) hoặc khi "
+        "phụ huynh muốn đặt lịch. KHÔNG tự đổi tiêu chí, KHÔNG tự đặt lịch — luôn confirm trước.\n"
+        "CHỐNG BỊA — RẤT QUAN TRỌNG: thông tin về Tutora (cách hoạt động, chính sách, giá, "
+        "hoàn tiền...) CHỈ được lấy từ kết quả tool answer_faq. Nếu answer_faq trả về RỖNG "
+        "(không có passages), bạn PHẢI nói thật: 'Mình chưa có thông tin này, bạn liên hệ "
+        "hỗ trợ Tutora để được giải đáp nhé' — TUYỆT ĐỐI KHÔNG tự bịa câu trả lời từ kiến "
+        "thức chung của bạn. Tương tự, không bịa thông tin gia sư, giá, hay lịch."
+    ),
+    "web": (
+        "Bạn là trợ lý đa năng của Tutora trên web. Giúp phụ huynh tìm gia sư VÀ "
+        "trả lời câu hỏi chung về Tutora (Tutora là gì, cách hoạt động, chính sách). "
+        "Tiếng Việt có dấu, rõ ràng. Dùng tool search_tutors / get_tutor_detail / "
+        "get_tutor_availability / answer_faq, không bịa. KHÔNG tự xử lý đặt lịch/thanh toán."
+    ),
+}
+
+
+# ───────────────────────── KHAI BÁO TOOL (schema cho LLM) ─────────────────────────
+# Tool narrow, job-specific, schema rõ — LLM chỉ điền tham số, không biết internals.
+_TOOL_DECLS = [
+    types.FunctionDeclaration(
+        name="search_tutors",
+        description=(
+            "Tìm danh sách gia sư phù hợp theo tiêu chí phụ huynh nêu. "
+            "Gọi khi phụ huynh muốn tìm/xem gia sư hoặc đổi tiêu chí (giá, môn, giới tính)."
+        ),
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                # KHÔNG có subject_id: môn lấy từ context (NestJS/onboarding truyền đúng id).
+                # Đổi môn -> phụ huynh xác nhận qua confirm_action, NestJS cập nhật context.
+                "min_rate": types.Schema(type=types.Type.NUMBER, description="Giá tối thiểu VND/giờ nếu nêu (vd 'trên 150k' -> 150000)"),
+                "max_rate": types.Schema(type=types.Type.NUMBER, description="Giá tối đa VND/giờ nếu nêu (vd 'dưới 200k' -> 200000)"),
+                "tutor_gender": types.Schema(type=types.Type.STRING, enum=["male", "female"], description="Giới tính gia sư nếu nêu"),
+                "desired_count": types.Schema(type=types.Type.INTEGER, description="Số gia sư muốn xem nếu nêu (vd '1-2 người' -> 2)"),
+            },
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="answer_faq",
+        description=(
+            "Tra cứu thông tin chung về Tutora (cách hoạt động, chính sách, giá chung, "
+            "Tutora là gì). Gọi khi phụ huynh hỏi câu KHÔNG phải về một gia sư cụ thể."
+        ),
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "question": types.Schema(type=types.Type.STRING, description="Câu hỏi của phụ huynh, nguyên văn"),
+            },
+            required=["question"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="get_tutor_detail",
+        description=(
+            "Lấy thông tin chi tiết của MỘT gia sư cụ thể (mô tả, kinh nghiệm, học vấn, "
+            "đánh giá). Gọi khi phụ huynh hỏi sâu về một gia sư trong danh sách đã gợi ý "
+            "(vd 'cho xem kỹ gia sư A', 'gia sư thứ 2 dạy sao')."
+        ),
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "tutor_id": types.Schema(type=types.Type.STRING, description="ID gia sư — lấy từ danh sách đã gợi ý trong ngữ cảnh"),
+            },
+            required=["tutor_id"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="get_tutor_availability",
+        description=(
+            "Lấy lịch rảnh / thời khoá biểu của một gia sư cụ thể. Gọi khi phụ huynh "
+            "hỏi gia sư rảnh khi nào, dạy được giờ nào, lịch trống ra sao."
+        ),
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "tutor_id": types.Schema(type=types.Type.STRING, description="ID gia sư — lấy từ danh sách đã gợi ý trong ngữ cảnh"),
+            },
+            required=["tutor_id"],
+        ),
+    ),
+    types.FunctionDeclaration(
+        name="confirm_action",
+        description=(
+            "GỌI tool này TRƯỚC khi thực hiện hành động NHẠY CẢM, để hỏi xác nhận phụ huynh:\n"
+            "- ĐỔI NGỮ CẢNH: phụ huynh muốn đổi môn / đổi lớp-cấp học / đổi sang bé khác / "
+            "đổi mục tiêu học (việc này sẽ tìm lại gia sư từ đầu).\n"
+            "- BOOKING: phụ huynh muốn đặt lịch / đăng ký học với một gia sư cụ thể.\n"
+            "KHÔNG tự đổi tiêu chí hay đặt lịch — luôn confirm trước. Sau khi gọi tool này, "
+            "DỪNG, chờ phụ huynh trả lời ở lượt sau."
+        ),
+        parameters=types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "type": types.Schema(type=types.Type.STRING, enum=["context_change", "booking"], description="Loại hành động nhạy cảm"),
+                "question": types.Schema(type=types.Type.STRING, description="Câu hỏi xác nhận ngắn, tiếng Việt (vd 'Bạn muốn đổi sang môn Toán cho bé, đúng không ạ?')"),
+                "options": types.Schema(type=types.Type.ARRAY, items=types.Schema(type=types.Type.STRING), description="2-3 lựa chọn ngắn cho phụ huynh bấm (vd ['Đúng rồi', 'Không, giữ như cũ'])"),
+            },
+            required=["type", "question"],
+        ),
+    ),
+    # ───────── GĐ2 — BOOKING (chưa bật) ─────────
+    # Khi scale lên đặt lịch + QR trên Zalo, THÊM tool vào đây. Lưu ý phân vai:
+    #   create_booking_draft(tutor_id, date, time, sessions)
+    #         -> .NET tạo NHÁP + tự tính tiền (KHÔNG để LLM tính). Trả về tóm tắt + số tiền.
+    #   confirm_and_generate_qr(draft_id) -> CHỈ sau khi phụ huynh xác nhận deterministic;
+    #         payment service sinh QR, KHÔNG phải LLM. NestJS render ảnh QR gửi Zalo.
+    # Agent vẫn chỉ THU THẬP slot bằng hội thoại; chốt tiền là bước xác nhận có nút bấm.
+]
+
+
+# ───────────────────────── HELPER GỌI .NET ─────────────────────────
+async def _dotnet_get(path: str) -> dict | None:
+    """GET .NET, trả content đã bóc {content: ...}. None nếu lỗi/không tìm thấy."""
+    url = f"{_settings.dotnet_be_url}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(url, headers={"Accept": "application/json"})
+            r.raise_for_status()
+            data = r.json()
+        return data.get("content", data)
+    except Exception as e:
+        print(f"agent _dotnet_get {path} error: {e}")
+        return None
+
+
+# ───────────────────────── THỰC THI TOOL (deterministic) ─────────────────────────
+async def _search_tutors(args: dict, ctx) -> dict:
+    """Bọc _fetch_candidates (.NET /recommend). Trả tóm tắt cho LLM + full list để render."""
+    # subject_id KHÔNG lấy từ LLM (hay bịa) — _fetch_candidates tự dùng ctx.subject_id.
+    filters = TutorChatFilters(
+        min_rate=args.get("min_rate"),
+        max_rate=args.get("max_rate"),
+        tutor_gender=args.get("tutor_gender"),
+        desired_count=args.get("desired_count"),
+    )
+    try:
+        content = await _fetch_candidates(ctx, filters, query=args.get("query") or "")
+        tutors = content.get("tutors", []) or []
+        # Hạ gia sư chưa có đánh giá xuống cuối (giống tutor_chat).
+        tutors.sort(key=lambda t: (t.get("totalReviews") or 0) == 0)
+    except Exception as e:
+        print(f"agent search_tutors error: {e}")
+        return {"_full": [], "count": 0, "error": "không tải được danh sách gia sư"}
+    # _full: list đầy đủ trả về client render card (KHÔNG đưa cho LLM, tránh tốn token).
+    # Phần còn lại là tóm tắt gọn để LLM diễn đạt.
+    summary = [
+        {"name": t.get("fullName") or t.get("name"), "rating": t.get("averageRating"),
+         "rate": t.get("hourlyRate") or t.get("priceMin")}
+        for t in tutors[:5]
+    ]
+    return {"_full": tutors, "count": len(tutors), "top": summary}
+
+
+async def _answer_faq(args: dict, gemini: genai.Client) -> dict:
+    """Bọc retrieve_chunks trên KB Tutora. Trả các đoạn văn để LLM diễn đạt lại."""
+    try:
+        chunks, _ = await retrieve_chunks(
+            get_supabase(), None, args["question"],
+            gemini=gemini, subject="tutora_kb",   # KB riêng cho thông tin Tutora
+        )
+    except Exception as e:
+        print(f"agent answer_faq error: {e}")
+        return {"passages": []}
+    return {"passages": [c.get("content") or c.get("text") for c in chunks]}
+
+
+async def _get_tutor_detail(args: dict, allowed_ids: set[str]) -> dict:
+    """Chi tiết 1 gia sư (.NET /full-profile). Chỉ cho phép id trong list đã gợi ý."""
+    tid = args.get("tutor_id")
+    if tid not in allowed_ids:
+        # Chặn LLM bịa id ngoài danh sách đã gợi ý.
+        return {"error": "gia sư này không có trong danh sách đã gợi ý"}
+    detail = await _dotnet_get(f"/api/tutors/{tid}/full-profile")
+    return detail or {"error": "không lấy được thông tin gia sư"}
+
+
+async def _get_tutor_availability(args: dict, allowed_ids: set[str]) -> dict:
+    """Lịch rảnh 1 gia sư (.NET /schedule). Chỉ cho phép id trong list đã gợi ý."""
+    tid = args.get("tutor_id")
+    if tid not in allowed_ids:
+        return {"error": "gia sư này không có trong danh sách đã gợi ý"}
+    sched = await _dotnet_get(f"/api/tutors/{tid}/schedule")
+    return sched or {"error": "không lấy được lịch gia sư"}
+
+
+async def _exec_tool(name: str, args: dict, ctx, gemini: genai.Client, allowed_ids: set[str]) -> dict:
+    """Map function_call của LLM -> code thật. Trả dict (sẽ thành function_response)."""
+    if name == "search_tutors":
+        return await _search_tutors(args, ctx)
+    if name == "answer_faq":
+        return await _answer_faq(args, gemini)
+    if name == "get_tutor_detail":
+        return await _get_tutor_detail(args, allowed_ids)
+    if name == "get_tutor_availability":
+        return await _get_tutor_availability(args, allowed_ids)
+    return {"error": f"unknown tool {name}"}
+
+
+# AGENT LOOP
+async def run_agent(body: AgentRequest) -> AgentResponse:
+    """Vòng lặp function-calling: LLM quyết định -> ta thực thi tool -> trả kết quả -> lặp."""
+    gemini: genai.Client = get_gemini_client()
+    persona = _PERSONA.get(body.channel, _PERSONA["zalo"])
+
+    # List gia sư đã gợi ý turn trước -> để agent hiểu "gia sư A" là ai, và CHẶN bịa id.
+    allowed_ids: set[str] = {t.tutor_id for t in body.shown_tutors}
+    if body.shown_tutors:
+        shown = "; ".join(f"{t.name or '?'} (id={t.tutor_id})" for t in body.shown_tutors)
+        persona = persona + (
+            f"\n\nGia sư đã gợi ý cho phụ huynh (dùng đúng id khi gọi tool chi tiết/lịch): {shown}"
+        )
+
+    # Dựng history dạng Content (role user/model).
+    contents: list[types.Content] = [
+        types.Content(role=("user" if m.role == "user" else "model"),
+                      parts=[types.Part.from_text(text=m.content)])
+        for m in body.history
+    ]
+    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=body.message)]))
+
+    def _make_config(force_tool: bool) -> types.GenerateContentConfig:
+        # force_tool=True (lượt đầu): ép model GỌI TOOL thay vì hỏi suông —
+        # flash-lite hay "hỏi trước khi search", mode ANY sửa điều đó (gợi-ý-trước).
+        # Các lượt sau AUTO để model tự do diễn đạt / kết thúc.
+        tool_cfg = None
+        if force_tool:
+            tool_cfg = types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(
+                    mode=types.FunctionCallingConfigMode.ANY,
+                )
+            )
+        return types.GenerateContentConfig(
+            system_instruction=persona,
+            tools=[types.Tool(function_declarations=_TOOL_DECLS)],
+            tool_config=tool_cfg,
+            temperature=0.2,
+            # automatic_function_calling tắt -> ta tự chạy loop để kiểm soát (gate booking, log).
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        )
+
+    collected_tutors: list = []   # gom kết quả search để trả kèm response (render card)
+
+    try:
+        for turn in range(_MAX_TURNS):
+            resp = await _generate_with_retry(
+                gemini, contents, _make_config(force_tool=(turn == 0)),
+            )
+
+            calls = resp.function_calls or []
+            if not calls:
+                # Không gọi tool nữa -> đây là câu trả lời cuối.
+                return AgentResponse(
+                    reply=(resp.text or "").strip(),
+                    tutors=collected_tutors,
+                )
+
+            # confirm_action: điểm nhạy cảm (đổi ngữ cảnh / booking) -> DỪNG, hỏi xác nhận.
+            # Không thực hiện hành động; NestJS render nút, chờ phụ huynh bấm lượt sau.
+            confirm = next((c for c in calls if c.name == "confirm_action"), None)
+            if confirm:
+                args = dict(confirm.args or {})
+                ctype = args.get("type")
+                return AgentResponse(
+                    reply=args.get("question") or "Bạn xác nhận giúp mình nhé?",
+                    tutors=collected_tutors,
+                    awaiting_confirmation=True,
+                    confirm_type=ctype,
+                    handoff_to_booking=(ctype == "booking"),
+                    suggestions=list(args.get("options") or []),
+                )
+
+            # Có tool call: append turn model + thực thi từng tool + append function_response.
+            contents.append(resp.candidates[0].content)
+            tool_parts = []
+            for call in calls:
+                result = await _exec_tool(call.name, dict(call.args or {}), body.context, gemini, allowed_ids)
+                # answer_faq rỗng -> trả thẳng câu fallback, KHÔNG phó mặc model tự xoay
+                # (flash-lite hay im lặng/bịa khi passages rỗng). Chống bịa chắc chắn.
+                if call.name == "answer_faq" and not (result.get("passages") or []):
+                    return AgentResponse(
+                        reply="Mình chưa có thông tin này. Bạn liên hệ hỗ trợ Tutora để được giải đáp chính xác nhé!",
+                        tutors=collected_tutors,
+                    )
+                # _full = list gia sư đầy đủ để render card; KHÔNG gửi lại cho LLM (tốn token).
+                if call.name == "search_tutors":
+                    collected_tutors = result.pop("_full", []) or collected_tutors
+                    # Cho phép hỏi chi tiết gia sư vừa search ngay trong cùng phiên.
+                    allowed_ids |= {t.get("tutorId") or t.get("tutor_id") for t in collected_tutors if t}
+                tool_parts.append(types.Part.from_function_response(name=call.name, response=result))
+            contents.append(types.Content(role="user", parts=tool_parts))
+    except _RETRYABLE as e:
+        # Gemini lỗi tạm thời (503/429/timeout) cả sau retry -> fallback graceful,
+        # KHÔNG ném 500 cho NestJS (tránh bot "chết câm" với phụ huynh).
+        print(f"agent gemini error sau retry: {e}")
+        return AgentResponse(
+            reply="Xin lỗi, hệ thống đang hơi bận. Bạn nhắn lại giúp mình sau giây lát nhé!",
+            tutors=collected_tutors,
+        )
+
+    # Hết MAX_TURNS mà vẫn gọi tool -> trả lời an toàn thay vì lặp mãi.
+    return AgentResponse(
+        reply="Xin lỗi, mình cần thêm thông tin. Bạn mô tả lại nhu cầu giúp mình nhé?",
+        tutors=collected_tutors,
+        handoff_to_booking=False,
+    )
