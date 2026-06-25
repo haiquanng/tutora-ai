@@ -70,13 +70,25 @@ _PERSONA = {
         "GIỌNG ĐIỆU: xưng 'em', gọi phụ huynh là 'anh/chị'. Lễ phép, thân thiện, "
         "tự nhiên như người Việt tư vấn thật. Có 'dạ', 'ạ' đúng mực (đừng lạm dụng). "
         "Trả lời NGẮN GỌN (1-2 câu), tiếng Việt có dấu. Tránh dịch máy/cứng nhắc.\n"
-        "KHI PHỤ HUYNH MUỐN TÌM GIA SƯ (kể cả nói mơ hồ như 'có gia sư Toán không'): "
-        "PHẢI gọi search_tutors NGAY với những tiêu chí đã biết — KHÔNG được hỏi lại trước "
-        "khi gọi search. Sau khi có kết quả: giới thiệu ngắn gọn rồi MỚI hỏi thêm 1 câu "
-        "để tinh chỉnh (vd 'Dạ bé nhà mình học lớp mấy để em lọc chính xác hơn ạ?'). "
-        "Tức là: GỢI Ý TRƯỚC, HỎI SAU. KHÔNG hỏi dồn nhiều câu một lúc.\n"
+        "HIỂU Ý NGƯỜI DÙNG THEO NGỮ CẢNH (quan trọng nhất):\n"
+        "- Đọc cả lịch sử hội thoại để hiểu câu ngắn/chung chung. Vd phụ huynh trả lời 'ờ', "
+        "'được', 'ok', 'cũng được' NGAY SAU khi em vừa hỏi (vd 'xem chi tiết không ạ?') = "
+        "ĐỒNG Ý với câu em hỏi — làm theo, KHÔNG đi tìm gia sư mới.\n"
+        "- Chào hỏi/lạc đề ('alo', 'shop ơi', 'chào em'): chào lại thân thiện, hỏi anh/chị "
+        "cần tìm gia sư môn gì cho bé. KHÔNG trả 'em chưa có thông tin' cho câu chào.\n"
+        "TƯ VẤN TÌM GIA SƯ — LINH HOẠT, ĐỪNG MÁY MÓC:\n"
+        "- NGƯỠNG ĐỦ ĐỂ GỢI Ý = có MÔN + LỚP + MỤC TIÊU (mất gốc/củng cố/nâng cao/ôn thi). "
+        "Khi đã đủ 3 thứ này, em PHẢI GỌI TOOL search_tutors (KHÔNG chỉ nói 'em tìm...' rồi "
+        "hỏi tiếp — đó là sai). Gọi tool xong, dựa kết quả để gợi ý. TUYỆT ĐỐI ĐỪNG hỏi thêm "
+        "thầy/cô hay giá TRƯỚC khi search — UX tệ; hỏi tinh chỉnh SAU khi đã gợi ý.\n"
+        "  VÍ DỤ: phụ huynh 'tìm gia sư Toán lớp 8 ôn thi' -> ĐỦ -> GỌI search_tutors ngay, "
+        "KHÔNG hỏi lại. Phụ huynh 'con lớp 10 mất gốc Lý' -> ĐỦ -> GỌI search_tutors ngay.\n"
+        "- Nếu CÒN THIẾU (mới có môn, hoặc môn+lớp nhưng CHƯA rõ mục tiêu): hỏi THÊM tối đa "
+        "1-2 câu then chốt để đủ ngưỡng trên, rồi gợi ý. Hỏi tự nhiên, từng câu, không dồn.\n"
+        "- Khi gợi ý -> giới thiệu TỐI ĐA 2 gia sư phù hợp nhất (Zalo hẹp), mỗi người 1 dòng "
+        "ngắn (tên + vì sao hợp). KHÔNG đổ cả danh sách.\n"
         "DÙNG TOOL:\n"
-        "- search_tutors: khi cần tìm/đổi tiêu chí gia sư. Gọi NGAY, đừng hỏi trước.\n"
+        "- search_tutors: khi đã đủ ngữ cảnh để tìm/đổi tiêu chí gia sư.\n"
         "- get_tutor_detail: khi hỏi sâu về MỘT gia sư trong danh sách đã gợi ý "
         "(bằng cấp, kinh nghiệm, phong cách dạy).\n"
         "- get_tutor_availability: khi hỏi gia sư rảnh giờ nào / lịch trống.\n"
@@ -303,41 +315,56 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
     ]
     contents.append(types.Content(role="user", parts=[types.Part.from_text(text=body.message)]))
 
-    def _make_config(force_tool: bool) -> types.GenerateContentConfig:
-        # force_tool=True (lượt đầu): ép model GỌI TOOL thay vì hỏi suông —
-        # flash-lite hay "hỏi trước khi search", mode ANY sửa điều đó (gợi-ý-trước).
-        # Các lượt sau AUTO để model tự do diễn đạt / kết thúc.
-        tool_cfg = None
-        if force_tool:
-            tool_cfg = types.ToolConfig(
-                function_calling_config=types.FunctionCallingConfig(
-                    mode=types.FunctionCallingConfigMode.ANY,
-                )
-            )
-        return types.GenerateContentConfig(
-            system_instruction=persona,
-            tools=[types.Tool(function_declarations=_TOOL_DECLS)],
-            tool_config=tool_cfg,
-            temperature=0.2,
-            # automatic_function_calling tắt -> ta tự chạy loop để kiểm soát (gate booking, log).
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-        )
+    # KHÔNG ép tool (AUTO): model TỰ HIỂU ý định + ngữ cảnh hội thoại rồi quyết định
+    # gọi tool hay trả lời/hỏi thêm. Câu chung chung ('ờ','được') không bị ép search;
+    # câu đủ ý ('tìm gia sư Toán lớp 8 ôn thi') thì tự gọi search. Linh hoạt, NLP thật.
+    config = types.GenerateContentConfig(
+        system_instruction=persona,
+        tools=[types.Tool(function_declarations=_TOOL_DECLS)],
+        temperature=0.3,
+        # automatic_function_calling tắt -> ta tự chạy loop để kiểm soát (gate booking, log).
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+    )
 
     collected_tutors: list = []   # gom kết quả search để trả kèm response (render card)
+    forced_search = False          # đã ép search 1 lần chưa (vá tật flash-lite lười tool)
+
+    # Cấu hình ép GỌI search_tutors (mode ANY, chỉ tool này) — dùng khi model "nói sẽ tìm
+    # gia sư" nhưng không gọi tool (flash-lite ở AUTO hay lười). Giữ NLP của AUTO + đảm bảo search.
+    force_search_cfg = types.GenerateContentConfig(
+        system_instruction=persona,
+        tools=[types.Tool(function_declarations=_TOOL_DECLS)],
+        tool_config=types.ToolConfig(function_calling_config=types.FunctionCallingConfig(
+            mode=types.FunctionCallingConfigMode.ANY, allowed_function_names=["search_tutors"],
+        )),
+        temperature=0.3,
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+    )
+    def _should_force_search(model_text: str) -> bool:
+        # CHỈ ép search khi model TỰ NÓI SẼ TÌM (vd 'em tìm gia sư Toán...') mà quên gọi tool.
+        # KHÔNG ép khi: chào hỏi, đổi môn (phải confirm), đã liệt kê gia sư rồi, hay câu phủ định.
+        t = model_text.lower()
+        intends = ("em tìm gia sư" in t or "em sẽ tìm" in t or "em tìm cho" in t
+                   or "để em tìm" in t or "em tìm giúp" in t)
+        # nếu model đã liệt kê gia sư (có '- ' hoặc 'tìm được') thì KHÔNG phải bỏ lỡ tool
+        already_listed = "tìm được" in t or "\n- " in model_text or "gồm" in t
+        return intends and not already_listed
 
     try:
-        for turn in range(_MAX_TURNS):
-            resp = await _generate_with_retry(
-                gemini, contents, _make_config(force_tool=(turn == 0)),
-            )
+        for _ in range(_MAX_TURNS):
+            resp = await _generate_with_retry(gemini, contents, config)
 
             calls = resp.function_calls or []
             if not calls:
-                # Không gọi tool nữa -> đây là câu trả lời cuối.
-                return AgentResponse(
-                    reply=(resp.text or "").strip(),
-                    tutors=collected_tutors,
-                )
+                text = (resp.text or "").strip()
+                # Model nói sẽ tìm gia sư mà KHÔNG gọi tool + chưa search lần nào -> ép search.
+                if (not forced_search and not collected_tutors and _should_force_search(text)):
+                    forced_search = True
+                    contents.append(resp.candidates[0].content)
+                    resp = await _generate_with_retry(gemini, contents, force_search_cfg)
+                    calls = resp.function_calls or []
+                if not calls:
+                    return AgentResponse(reply=text, tutors=collected_tutors)
 
             # confirm_action: điểm nhạy cảm (đổi ngữ cảnh / booking) -> DỪNG, hỏi xác nhận.
             # Không thực hiện hành động; NestJS render nút, chờ phụ huynh bấm lượt sau.
