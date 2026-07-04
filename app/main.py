@@ -8,16 +8,20 @@ from .routers import health, solve, recommend, tutor_chat, agent
 from .core.middleware import configure_middleware
 from .core.openapi import configure_openapi
 from .core.limiter import limiter
-from .services.tutor_vector_sync import tutor_vector_sync_loop
+from .services.tutor_vector_sync import fast_path_loop, reconcile_sweep_loop
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # Sync metadata tutor_vectors từ DB nghiệp vụ — chạy nền, mỗi 24h.
-    # tutor_vectors là derived index; không sync thì ranking chấm trên số liệu cũ.
-    sync_task = asyncio.create_task(tutor_vector_sync_loop())
+    # Đồng bộ metadata tutor_vectors (derived index) từ DB nghiệp vụ — hybrid:
+    #  - fast-path: poll incremental mỗi 2 phút (độ trễ thấp, chi phí ~0)
+    #  - sweep: full reconcile mỗi 6h (bắt update sót + xoá orphan; sàn đúng đắn)
+    # Không sync thì Ranking Core chấm điểm trên rating/giá cũ dần.
+    tasks = [asyncio.create_task(fast_path_loop()),
+             asyncio.create_task(reconcile_sweep_loop())]
     yield
-    sync_task.cancel()
+    for t in tasks:
+        t.cancel()
 
 
 app = FastAPI(
