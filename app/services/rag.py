@@ -15,7 +15,9 @@ async def retrieve_chunks(
     top_k: int = 3,
     gemini: Optional[genai.Client] = None,
     subject: str = "toan",
+    min_similarity: float = 0.75,
 ) -> Tuple[List[dict], Optional[float]]:
+    # min_similarity: ngưỡng lọc theo cosine. Đo thực tế trên gemini-embedding-2
     try:
         if not gemini:
             return [], None
@@ -35,7 +37,7 @@ async def retrieve_chunks(
         }).execute()
 
         chunks = db_result.data or []
-        filtered = [c for c in chunks if c.get("similarity", 0) >= 0.75]
+        filtered = [c for c in chunks if c.get("similarity", 0) >= min_similarity]
         if filtered:
             top_score = max(c.get("similarity", 0) for c in filtered)
             return filtered, top_score
@@ -48,7 +50,7 @@ async def retrieve_chunks(
                 "filter_chapter": None,
                 "filter_subject": subject,
             }).execute()
-            fallback_filtered = [c for c in (fallback.data or []) if c.get("similarity", 0) >= 0.75]
+            fallback_filtered = [c for c in (fallback.data or []) if c.get("similarity", 0) >= min_similarity]
             if fallback_filtered:
                 top_score = max(c.get("similarity", 0) for c in fallback_filtered)
                 return fallback_filtered, top_score
