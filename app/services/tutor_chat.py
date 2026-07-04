@@ -196,9 +196,10 @@ async def tutor_chat(body: TutorChatRequest) -> TutorChatResponse:
         content = await _fetch_candidates(body.context, filters, body.message)
         tutors = content.get("tutors", []) or []
         ai_ranked = bool(content.get("aiRanked", False))
-        # Hạ gia sư chưa có đánh giá (totalReviews=0) xuống cuối — tránh người mới /
-        # hồ sơ lệch bậc đứng top "Rất phù hợp". Stable: giữ thứ tự rerank trong từng nhóm.
-        tutors.sort(key=lambda t: (t.get("totalReviews") or 0) == 0)
+        # Thứ tự do Ranking Core quyết (Bayesian + blend) — KHÔNG re-sort đè lên.
+        # Chỉ khi core fail (.NET fallback SQL order) mới hạ 0-review xuống cuối.
+        if not ai_ranked:
+            tutors.sort(key=lambda t: (t.get("totalReviews") or 0) == 0)
     except Exception as e:
         print(f"tutor_chat candidates error: {e}")
         return TutorChatResponse(

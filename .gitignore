@@ -41,9 +41,6 @@ huggingface/
 # Supabase
 supabase/
 
-# Tests
-tests/
-
 # Scripts
 scripts/
 
