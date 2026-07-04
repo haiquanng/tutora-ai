@@ -51,6 +51,10 @@ class AgentRequest(BaseModel):
     # List gia sư vừa gợi ý (NestJS giữ) -> agent trả lời được "chi tiết gia sư A".
     shown_tutors: List[ShownTutor] = []
 
+class AgentContextPatch(BaseModel):
+    subject_id: Optional[int] = None
+    grade_level_id: Optional[int] = None
+
 class AgentResponse(BaseModel):
     reply: str
     tutors: List[Dict[str, Any]] = []        # proxy shape từ .NET recommend; render card riêng
@@ -61,6 +65,8 @@ class AgentResponse(BaseModel):
     awaiting_confirmation: bool = False
     confirm_type: Optional[str] = None       # "context_change" | "booking"
     suggestions: List[str] = []              # các lựa chọn ngắn cho phụ huynh bấm
+    # Môn/lớp mới sau khi đổi giữa chat -> NestJS lưu để các turn sau gửi đúng subject_id.
+    context_patch: Optional[AgentContextPatch] = None
 
 class SolveRequest(BaseModel):
     text: Optional[str] = None
