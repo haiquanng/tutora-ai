@@ -38,6 +38,9 @@ _MAX_TURNS = 5  # guard: chặn vòng lặp tool vô hạn (agent gọi tool mã
 # PHẢI khớp MAX_CARDS bên NestJS (zalo.handler) — số card gia sư thực render trên Zalo.
 # LLM chỉ giới thiệu đúng bấy nhiêu người để câu chữ khớp số card hiển thị.
 _MAX_CARDS_SHOWN = 2
+# Số từ tối thiểu trong 'query' để được phép recommend — gate tư vấn: buộc agent
+# thu thập đủ nhu cầu (mục tiêu + nhu cầu đặc thù) trước khi search, không bắn card sớm.
+_MIN_QUERY_WORDS = 6
 
 # Retry khi Gemini lỗi TẠM THỜI (503 quá tải / 429 / timeout) — lỗi phía Google,
 # không liên quan quota mình. Backoff tăng dần; hết retry -> raise để fallback graceful.
@@ -80,24 +83,23 @@ _PERSONA = {
         "ĐỒNG Ý với câu em hỏi — làm theo, KHÔNG đi tìm gia sư mới.\n"
         "- Chào hỏi/lạc đề ('alo', 'shop ơi', 'chào em'): chào lại thân thiện, hỏi anh/chị "
         "cần tìm gia sư môn gì cho bé. KHÔNG trả 'em chưa có thông tin' cho câu chào.\n"
-        "TƯ VẤN TÌM GIA SƯ — LINH HOẠT, ĐỪNG MÁY MÓC:\n"
-        "- NGƯỠNG ĐỦ ĐỂ GỢI Ý = có MÔN + LỚP + MỤC TIÊU (mất gốc/củng cố/nâng cao/ôn thi). "
-        "Khi đã đủ 3 thứ này, em PHẢI GỌI TOOL search_tutors (KHÔNG chỉ nói 'em tìm...' rồi "
-        "hỏi tiếp — đó là sai). Gọi tool xong, dựa kết quả để gợi ý. TUYỆT ĐỐI ĐỪNG hỏi thêm "
-        "thầy/cô hay giá TRƯỚC khi search — UX tệ; hỏi tinh chỉnh SAU khi đã gợi ý.\n"
-        "  VÍ DỤ: phụ huynh 'tìm gia sư Toán lớp 8 ôn thi' -> ĐỦ -> GỌI search_tutors ngay, "
-        "KHÔNG hỏi lại. Phụ huynh 'con lớp 10 mất gốc Lý' -> ĐỦ -> GỌI search_tutors ngay.\n"
-        "- Nếu CÒN THIẾU (mới có môn, hoặc môn+lớp nhưng CHƯA rõ mục tiêu): TUYỆT ĐỐI CHƯA "
-        "gọi search_tutors — thiếu LỚP thì kết quả trả về sai cấp học, gợi ý sẽ vô nghĩa. "
-        "Hỏi THÊM tối đa 1-2 câu then chốt để đủ ngưỡng trên, rồi mới search. Hỏi tự nhiên, "
-        "từng câu, không dồn.\n"
-        "- CHỈ HỎI CÁI CÒN THIẾU, đừng lặp lại câu hỏi cũ. Đọc kỹ hội thoại: nếu phụ huynh đã "
-        "cho MỤC TIÊU ('luyện thi') nhưng thiếu LỚP -> hỏi ĐÚNG 'bé học lớp mấy ạ?', KHÔNG hỏi "
-        "lại cả môn+lớp+mục tiêu. Tích luỹ thông tin qua các lượt, không bắt phụ huynh nhắc lại.\n"
-        "- Khi gợi ý -> giới thiệu ĐÚNG những gia sư trong field 'shown' của kết quả search "
-        "(tối đa 2, đúng số card hiển thị). KHÔNG nói tổng số kiểu 'tìm được 10 gia sư' — phụ "
-        "huynh chỉ thấy 2 thẻ nên nói thế gây rối. Chỉ nói về người trong 'shown', mỗi người 1 "
-        "dòng ngắn (tên + vì sao hợp).\n"
+        "TƯ VẤN TÌM GIA SƯ — HỎI SÂU TRƯỚC, GỢI Ý SAU (QUAN TRỌNG NHẤT):\n"
+        "- Em là NGƯỜI TƯ VẤN, không phải máy tra cứu. TUYỆT ĐỐI KHÔNG gợi ý gia sư ngay khi "
+        "phụ huynh mới nói môn + lớp. Phải HIỂU BÉ trước: chỉ có môn+lớp thì mọi phụ huynh nhận "
+        "cùng vài gia sư top rating — vô nghĩa, không phải tư vấn.\n"
+        "- TRƯỚC KHI gọi search_tutors, PHẢI thu thập đủ (hỏi tự nhiên, TỪNG CÂU MỘT, không dồn "
+        "hết 1 lượt): (1) MỤC TIÊU học — mất gốc / củng cố / nâng cao / ôn thi; (2) TÌNH TRẠNG "
+        "bé — học lực hiện tại, chỗ nào yếu, tiếp thu nhanh/chậm; (3) MONG MUỐN về gia sư — tính "
+        "cách (kiên nhẫn, nghiêm khắc), cách dạy, hoặc hình thức học (online/tại nhà). Hỏi 2-4 "
+        "lượt cho tự nhiên như đang trò chuyện, thể hiện sự quan tâm đến bé.\n"
+        "- Khi ĐÃ hiểu đủ -> tổng hợp toàn bộ nhu cầu thành 1 câu điền vào param 'query' rồi GỌI "
+        "search_tutors. Nếu gọi mà thiếu, tool trả 'error' nhắc hỏi thêm — làm theo, ĐỪNG bịa.\n"
+        "- CHỈ HỎI CÁI CÒN THIẾU, đừng lặp câu hỏi cũ. Đọc kỹ hội thoại, tích luỹ qua các lượt, "
+        "không bắt phụ huynh nhắc lại điều đã nói.\n"
+        "- Khi gợi ý -> giới thiệu ĐÚNG gia sư trong field 'shown' của kết quả (tối đa 2, đúng số "
+        "card). Mỗi người 1 dòng ngắn: tên + GIẢI THÍCH VÌ SAO hợp với nhu cầu cụ thể vừa nghe "
+        "(vd 'cô A kiên nhẫn, chuyên kèm bé mất gốc lấy lại căn bản' — nối với điều phụ huynh nói). "
+        "KHÔNG nói tổng số kiểu 'tìm được 10 gia sư' (phụ huynh chỉ thấy 2 thẻ).\n"
         "- HỎI CHI TIẾT 1 GIA SƯ: khi phụ huynh hỏi sâu về MỘT gia sư (vd 'chi tiết thầy Đạt'), "
         "CHỈ trả lời về gia sư ĐÓ. TUYỆT ĐỐI KHÔNG tự giới thiệu thêm gia sư khác, KHÔNG gợi ý "
         "người mới (NestJS sẽ gửi lại card thừa). Chỉ thêm người khác khi phụ huynh YÊU CẦU.\n"
@@ -121,9 +123,9 @@ _PERSONA = {
         "nói thật Tutora chưa hỗ trợ môn đó). TUYỆT ĐỐI KHÔNG giới thiệu gia sư nào khi có error "
         "(kể cả gia sư đã gợi ý trước đó), KHÔNG bịa thêm thông tin.\n"
         "DÙNG TOOL:\n"
-        "- search_tutors: khi đã đủ ngữ cảnh để tìm/đổi tiêu chí gia sư. Điền 'subject'/'grade_level_id' khi đổi môn/lớp. "
-        "Nếu phụ huynh nêu nhu cầu ĐẶC THÙ (mất gốc, ôn thi, cần gia sư kiên nhẫn/nghiêm khắc, phương pháp dạy...) "
-        "-> điền tóm tắt vào param 'query' để hệ thống tìm gia sư khớp nhất; chỉ nêu môn/lớp/giá thì bỏ trống.\n"
+        "- search_tutors: CHỈ gọi khi ĐÃ tư vấn đủ (hiểu mục tiêu + tình trạng bé + mong muốn "
+        "về gia sư) và tổng hợp được vào param 'query'. Điền 'subject'/'grade_level' khi đổi "
+        "môn/lớp. Gọi khi mới có môn+lớp là SAI — tool sẽ trả error nhắc hỏi thêm.\n"
         "- get_tutor_detail: khi hỏi sâu về MỘT gia sư trong danh sách đã gợi ý "
         "(bằng cấp, kinh nghiệm, phong cách dạy).\n"
         "- get_tutor_availability: khi hỏi gia sư rảnh giờ nào / lịch trống.\n"
@@ -196,9 +198,10 @@ _TOOL_DECLS = [
         parameters=types.Schema(
             type=types.Type.OBJECT,
             properties={
-                # query: nhu cầu đặc thù ngoài filter cứng -> kích hoạt semantic rerank
-                # (embedding + pgvector) ở Ranking Core. Không điền = chỉ sort theo chất lượng.
-                "query": types.Schema(type=types.Type.STRING, description="Mô tả nhu cầu ĐẶC THÙ của phụ huynh bằng 1 câu ngắn tiếng Việt, NẾU có: mục tiêu học (mất gốc/ôn thi/nâng cao), tính cách gia sư mong muốn (kiên nhẫn, nghiêm khắc...), phương pháp dạy. Vd: 'con mất gốc Toán cần gia sư kiên nhẫn dạy từ căn bản'. KHÔNG điền nếu phụ huynh chỉ nêu môn/lớp/giá."),
+                # query: BẮT BUỘC để tư vấn chất lượng — nhu cầu đặc thù + mục tiêu, dùng
+                # cho semantic rerank (embedding + pgvector). Gate ở code chặn search nếu
+                # query rỗng/hời hợt -> buộc agent hỏi đủ nhu cầu trước khi recommend.
+                "query": types.Schema(type=types.Type.STRING, description="BẮT BUỘC. Tổng hợp nhu cầu phụ huynh thành 1 câu tiếng Việt gồm: MỤC TIÊU học (mất gốc/củng cố/nâng cao/ôn thi) + ÍT NHẤT 1 nhu cầu đặc thù (tình trạng con, tính cách gia sư mong muốn như kiên nhẫn/nghiêm khắc, hình thức học, phương pháp). Vd: 'con lớp 8 mất gốc Toán, tiếp thu chậm, cần gia sư kiên nhẫn dạy lại từ căn bản, học online'. CHỈ điền khi ĐÃ hỏi đủ các thông tin này — nếu chưa đủ thì hỏi phụ huynh trước, ĐỪNG gọi tool."),
                 # subject: CHỈ điền khi phụ huynh ĐỔI/THÊM môn so với môn đang tư vấn.
                 # Không điền -> giữ môn hiện hành (context). Backend map tên -> subjectId.
                 "subject": types.Schema(type=types.Type.STRING, description="Tên môn học NẾU phụ huynh đổi/thêm môn (vd 'Toán', 'Ngữ văn', 'Sinh học', 'Hóa học'). KHÔNG điền nếu vẫn môn cũ."),
@@ -387,6 +390,21 @@ async def _search_tutors(args: dict, ctx, patch_out: dict) -> dict:
             "error": "chưa biết bé học lớp mấy — hỏi phụ huynh LỚP của bé trước rồi mới tìm được gia sư đúng cấp học",
         }
 
+    # Gate TƯ VẤN: chặn recommend cho tới khi thu thập đủ nhu cầu (mục tiêu + ≥1 nhu cầu
+    # đặc thù), tổng hợp trong 'query'. Không có gate này, flash-lite bắn card ngay khi
+    # mới có môn+lớp -> mọi phụ huynh nhận cùng top-rating, semantic ranking vô dụng.
+    # Heuristic: query phải >= _MIN_QUERY_WORDS từ (đủ chứa mục tiêu + 1 nhu cầu); câu
+    # cụt kiểu 'tìm gia sư Toán lớp 8' không qua được -> model buộc hỏi thêm.
+    query = (args.get("query") or "").strip()
+    if len(query.split()) < _MIN_QUERY_WORDS:
+        return {
+            "_full": [], "shown_count": 0, "shown": [],
+            "error": ("chưa đủ thông tin để tư vấn đúng người. HỎI phụ huynh (từng câu, tự nhiên): "
+                      "mục tiêu học của bé (mất gốc/củng cố/nâng cao/ôn thi), tình trạng hiện tại của bé, "
+                      "và mong muốn về gia sư (tính cách, cách dạy) hoặc hình thức học. "
+                      "Khi đã rõ, tổng hợp vào 'query' rồi mới gọi lại search_tutors."),
+        }
+
     filters = TutorChatFilters(
         min_rate=args.get("min_rate"),
         max_rate=args.get("max_rate"),
@@ -395,7 +413,7 @@ async def _search_tutors(args: dict, ctx, patch_out: dict) -> dict:
         subject_id=ctx.subject_id,  # truyền tường minh để recommend lọc đúng môn hiện hành
     )
     try:
-        content = await _fetch_candidates(ctx, filters, query=args.get("query") or "")
+        content = await _fetch_candidates(ctx, filters, query=query)
         tutors = content.get("tutors", []) or []
         # Thứ tự do Ranking Core quyết (Bayesian + blend) — KHÔNG re-sort đè lên.
         # Chỉ khi core fail (aiRanked=false, .NET fallback SQL order) mới hạ gia sư

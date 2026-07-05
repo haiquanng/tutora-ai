@@ -20,7 +20,7 @@ def test_doi_mon_phai_confirm(agent):
 
 def test_booking_intent_phai_confirm(agent):
     history = [
-        {"role": "user", "content": "tìm gia sư Toán lớp 8 ôn thi"},
+        {"role": "user", "content": "bé lớp 8 mất gốc Toán, cần cô kiên nhẫn dạy online"},
         {"role": "assistant", "content": "Dạ em tìm được gia sư Phạm Thị Bích Hằng và Nguyễn Văn Bình ạ."},
     ]
     shown = [
