@@ -1,0 +1,32 @@
+# Source of truth cho container tutora-ai trên VPS (versioned trong git).
+# CI sync file này lên VPS mỗi deploy, rồi: docker compose up -d --wait tutora-ai.
+#
+# AI_IMAGE do CI ghi vào .env trên VPS = ghcr.io/haiquanng/tutora-ai:<git-sha>
+# (pin theo SHA bất biến -> rollback = đổi lại tag cũ). Fallback :latest khi chạy tay.
+services:
+  tutora-ai:
+    image: ${AI_IMAGE:-ghcr.io/haiquanng/tutora-ai:latest}
+    container_name: tutora-ai
+    restart: always
+    # Toàn bộ secret/env nằm ở .env trên VPS (root-only perms), KHÔNG commit vào git.
+    env_file:
+      - .env
+    # Healthcheck để `docker compose up --wait` biết container thật sự sẵn sàng
+    # (không chỉ "đã start") -> deploy fail nếu app không lên -> không phục vụ bản hỏng.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - tutora
+
+# Network external dùng CHUNG với bot (bot gọi http://tutora-ai:8000). Bot ở 2 network
+# (tutora-net + tutora-zalo-bot_default); dùng 'tutora-net' vì đây là network đặt tên
+# chủ đích cho giao tiếp nội bộ giữa các service. Xác nhận: container tutora-ai phải
+# cùng network này (docker inspect tutora-ai).
+networks:
+  tutora:
+    external: true
+    name: tutora-net
