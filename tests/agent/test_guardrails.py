@@ -54,3 +54,15 @@ def test_input_rac_khong_lac_huong(agent):
     r = agent("asdkjaskldjaklsjd")
     assert r["reply"] != ""
     assert len(r["tutors"]) == 0
+
+
+def test_hoi_lich_ranh_khong_tra_rong(agent):
+    """Hỏi lịch rảnh gia sư đã gợi ý -> tool get_tutor_availability chạy, model PHẢI sinh
+    text (không được rỗng). Bug cũ: model gọi tool xong im -> bot 'đứt' với phụ huynh."""
+    shown = [{"tutor_id": "d39d256c-2fec-44d7-baf5-e26eb270ce4c", "name": "Trần Thu Thủy"}]
+    history = [
+        {"role": "user", "content": "tìm gia sư Hóa lớp 11 cho con ôn thi cần cô kiên nhẫn"},
+        {"role": "assistant", "content": "Dạ em tìm được cô Trần Thu Thủy ạ."},
+    ]
+    r = agent("giờ rảnh của cô như nào", history=history, shown_tutors=shown)
+    assert r["reply"] != "", "bot im khi hỏi lịch rảnh (reply rỗng sau tool call)"

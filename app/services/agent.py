@@ -519,6 +519,7 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
     collected_tutors: list = []   # gom kết quả search để trả kèm response (render card)
     forced_search = False          # đã ép search 1 lần chưa (vá tật flash-lite lười tool)
     forced_confirm = False         # đã ép confirm_action 1 lần chưa (vá tật model tự bịa câu hỏi xác nhận)
+    used_tool = False              # đã thực thi tool nào chưa -> biết có cần ép sinh text tóm tắt khi reply rỗng
     # Môn/lớp đổi giữa chat -> tích vào đây, trả về context_patch cho NestJS lưu.
     patch_out: dict = {}
 
@@ -595,23 +596,25 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
                     resp = await _generate_with_retry(gemini, contents, force_search_cfg)
                     calls = resp.function_calls or []
                 if not calls:
-                    # Vòng lặp đã có tool result trước đó (collected_tutors) nhưng model không
-                    # sinh text tóm tắt -> ép thêm 1 lượt yêu cầu tóm tắt, tránh trả reply rỗng
-                    # cho phụ huynh (card gia sư hiện ra không lời giới thiệu).
-                    if not text and collected_tutors:
+                    # Model gọi tool xong (search / chi tiết / lịch rảnh) nhưng KHÔNG sinh
+                    # text tóm tắt -> reply rỗng, bot "im" với phụ huynh. Ép thêm 1 lượt yêu
+                    # cầu tóm tắt. Áp dụng cho MỌI tool (không chỉ search) -> nhánh hỏi chi
+                    # tiết/lịch rảnh cũng không bị đứt. `used_tool` = đã chạy tool ít nhất 1 lần.
+                    if not text and used_tool:
                         contents.append(resp.candidates[0].content)
                         follow_up = await _generate_with_retry(gemini, contents, config)
                         follow_text = _sanitize_reply((follow_up.text or "").strip())
                         if follow_text and not (follow_up.function_calls or []):
                             text = follow_text
-                        elif not text:
-                            # Fallback template: model vẫn không sinh text -> tổng hợp từ
-                            # danh sách gia sư đã có, không để phụ huynh nhận màn hình trống.
-                            names = [t.get("fullName") or t.get("name") for t in collected_tutors[:_MAX_CARDS_SHOWN] if t]
+                    # Fallback cuối: model vẫn im. Nếu có gia sư đã search -> tổng hợp tên;
+                    # nếu là nhánh chi tiết/lịch (không có list) -> câu an toàn chung.
+                    if not text and used_tool:
+                        names = [t.get("fullName") or t.get("name") for t in collected_tutors[:_MAX_CARDS_SHOWN] if t]
+                        if names:
                             text = ("Dạ em tìm được gia sư " + " và ".join(n for n in names if n)
-                                    + " phù hợp ạ. Anh/chị xem chi tiết giúp em nhé!") if names else (
-                                "Dạ em tìm được vài gia sư phù hợp, anh/chị xem chi tiết giúp em nhé!"
-                            )
+                                    + " phù hợp ạ. Anh/chị xem chi tiết giúp em nhé!")
+                        else:
+                            text = "Dạ em đã kiểm tra xong, anh/chị cần em hỗ trợ thêm gì nữa không ạ?"
                     return AgentResponse(reply=text, tutors=collected_tutors, context_patch=_patch())
 
             # confirm_action: điểm nhạy cảm (đổi ngữ cảnh / booking) -> DỪNG, hỏi xác nhận.
@@ -631,6 +634,7 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
                 )
 
             # Có tool call: append turn model + thực thi từng tool + append function_response.
+            used_tool = True
             contents.append(resp.candidates[0].content)
             tool_parts = []
             for call in calls:

@@ -11,6 +11,30 @@ class TutorChatContext(BaseModel):
     teaching_mode: Optional[str] = None
     city: Optional[str] = None
 
+
+# ── Session memory: tóm tắt history cũ khi user quay lại sau gap dài ──
+class SummarizeSessionRequest(BaseModel):
+    # NestJS gửi history phiên cũ khi phát hiện user quay lại (gap > threshold).
+    history: List[HistoryMessage] = []
+    shown_tutors: List["ShownTutor"] = []   # gia sư đã gợi ý phiên trước (để không bắn lại)
+
+class SessionMemory(BaseModel):
+    # Structured facts (nguồn sự thật, NestJS lưu Postgres) — dùng pre-fill search sau.
+    subject: Optional[str] = None       # tên môn (vd "Ngữ văn")
+    grade: Optional[int] = None         # số lớp (1-12)
+    goal: Optional[str] = None          # mục tiêu: mất gốc / củng cố / nâng cao / ôn thi
+    budget_max: Optional[float] = None  # ngân sách trần VND/giờ nếu có
+    preferences: Optional[str] = None   # mong muốn khác: tính cách gia sư, hình thức học...
+    tutors_shown: List[str] = []        # tên gia sư đã gợi ý phiên trước
+
+class SummarizeSessionResponse(BaseModel):
+    # recap: 1 câu tiếng Việt để chào lại tự nhiên. memory: facts để lưu + pre-fill.
+    recap: str
+    memory: SessionMemory
+    # has_pending_search: phiên cũ có đang dở việc tìm gia sư không (để welcome-back
+    # hỏi "tiếp tục hay tìm mới"); False nếu chỉ chào hỏi linh tinh, không cần recap.
+    has_pending_search: bool = False
+
 class TutorChatFilters(BaseModel):
     min_rate: Optional[float] = None
     max_rate: Optional[float] = None
@@ -124,3 +148,7 @@ class SolveResponse(BaseModel):
     verified: Optional[bool] = None
     confidence: float
     rag_used: bool
+
+
+# Resolve forward-ref "ShownTutor" trong SummarizeSessionRequest (định nghĩa sau nó).
+SummarizeSessionRequest.model_rebuild()
