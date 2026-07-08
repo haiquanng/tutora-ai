@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
-from .routers import health, solve, recommend, tutor_chat, agent, embed
+from .routers import health, solve, recommend, tutor_chat, agent, embed, extract
 from .core.middleware import configure_middleware
 from .core.openapi import configure_openapi
 from .core.limiter import limiter
@@ -53,3 +53,4 @@ app.include_router(recommend.router, tags=["recommend"])
 app.include_router(tutor_chat.router, tags=["tutor-chat"])
 app.include_router(agent.router, tags=["agent"])
 app.include_router(embed.router, tags=["embed"])
+app.include_router(extract.router, tags=["extract"])

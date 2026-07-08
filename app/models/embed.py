@@ -11,23 +11,23 @@ from typing import List, Optional
 
 
 class EmbedItem(BaseModel):
-    id: str        # question_id bên .NET — echo lại trong response để .NET map đúng row
-    text: str      # thường là content + solution ghép lại (đề + lời giải mẫu)
+    id: str        
+    text: str      
 
 
 class EmbedRequest(BaseModel):
-    # Batch: 1 PDF ra ~20 câu -> .NET gửi 1 lần cả loạt, tránh 20 HTTP request lẻ.
+    
     items: List[EmbedItem]
 
 
 class EmbedResultItem(BaseModel):
     id: str
-    embedding: Optional[List[float]] = None  # 768 số; null nếu row đó embed lỗi
-    error: Optional[str] = None              # lý do lỗi cho row này (nếu có)
+    embedding: Optional[List[float]] = None  
+    error: Optional[str] = None              
 
 
 class EmbedResponse(BaseModel):
-    # model + dim để .NET lưu kèm -> sau này đổi model còn biết row nào cần re-embed.
+    
     model: str
     dim: int
     results: List[EmbedResultItem]
