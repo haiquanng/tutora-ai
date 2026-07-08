@@ -6,6 +6,45 @@ from app.core.config import get_settings
 
 _settings = get_settings()
 
+# grade text (classifier/FE) -> grade_level_id (DB chinh). Question bank hien chi Toan.
+_GRADE_TO_ID = {"9": 57, "10": 58, "11": 59, "12": 60, "thi_vao_10": 57}
+_SUBJECT_TOAN_ID = 1
+
+
+async def retrieve_questions(
+    sb: Client,
+    query: str,
+    grade: Optional[str] = None,
+    chapter: Optional[str] = None,
+    top_k: int = 3,
+    gemini: Optional[genai.Client] = None,
+    min_similarity: float = 0.78,
+) -> List[dict]:
+    """Tim cau TUONG TU trong question bank (bang questions) da co loi giai mau.
+    Tra ve list {content, solution, similarity, ...}. Rong neu khong trung / loi."""
+    try:
+        if not gemini:
+            return []
+        result = gemini.models.embed_content(
+            model="gemini-embedding-2",
+            contents=query,
+            config={"output_dimensionality": _settings.rag_embedding_dim},
+        )
+        embedding = result.embeddings[0].values
+
+        db_result = sb.rpc("match_questions", {
+            "query_embedding": embedding,
+            "match_count": top_k,
+            "filter_subject_id": _SUBJECT_TOAN_ID,
+            "filter_grade_id": _GRADE_TO_ID.get(grade),
+            "filter_chapter": chapter,
+            "min_similarity": min_similarity,
+        }).execute()
+        return db_result.data or []
+    except Exception as e:
+        print(f"match_questions error: {e}")
+        return []
+
 async def retrieve_chunks(
     sb: Client,
     model,  # unused — kept for interface compatibility

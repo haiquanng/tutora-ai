@@ -13,6 +13,7 @@ async def solve_stream(
     rag_chunks: Optional[List[dict]] = None,
     history: Optional[List[dict]] = None,
     is_problem: bool = True,
+    bank_matches: Optional[List[dict]] = None,
 ) -> AsyncGenerator[dict, None]:
     """Stream text tự nhiên theo phong cách gia sư, không JSON."""
     contents = []
@@ -21,7 +22,7 @@ async def solve_stream(
         contents.append(types.Content(role=role, parts=[types.Part(text=msg["content"])]))
 
     if is_problem:
-        current_prompt = build_solve_prompt_v2(question, rag_chunks)
+        current_prompt = build_solve_prompt_v2(question, rag_chunks, bank_matches)
         system = TUTOR_SYSTEM_V2
     else:
         current_prompt = question

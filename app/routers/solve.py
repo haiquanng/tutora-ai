@@ -40,13 +40,18 @@ async def _sse_generator(
             return
 
         if is_problem:
+            # Uu tien question bank (cau tuong tu co loi giai mau) + rag_chunks (tai lieu)
+            bank_matches = await rag.retrieve_questions(
+                sb=sb, query=problem_text, grade=grade, chapter=chapter,
+                top_k=settings.rag_top_k, gemini=gemini,
+            )
             rag_chunks, _ = await rag.retrieve_chunks(
                 sb=sb, model=embed_model, query=problem_text,
                 grade=grade, chapter=chapter, top_k=settings.rag_top_k,
                 gemini=gemini,
             )
         else:
-            rag_chunks, _ = [], None
+            rag_chunks, bank_matches = [], []
 
         async for chunk in solver_stream.solve_stream(
             client=gemini,
@@ -56,6 +61,7 @@ async def _sse_generator(
             rag_chunks=rag_chunks,
             history=history,
             is_problem=is_problem,
+            bank_matches=bank_matches,
         ):
             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 

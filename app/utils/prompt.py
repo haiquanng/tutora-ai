@@ -77,8 +77,21 @@ KHÔNG trả về JSON, KHÔNG dùng code block, chỉ text thuần.
 def build_solve_prompt_v2(
     question: str,
     rag_chunks: Optional[List[dict]] = None,
+    bank_matches: Optional[List[dict]] = None,
 ) -> str:
     parts = []
+
+    # Uu tien: cau tuong tu trong question bank co LOI GIAI MAU (thay co/Bo GD) ->
+    # AI tham chieu cach giai chuan, tranh biya, Viet hoa dung chuong trinh VN.
+    if bank_matches:
+        ctx = "\n\n".join([
+            f"Bài mẫu {i+1} (đề): {m['content'][:300]}\nLời giải mẫu: {(m.get('solution') or '')[:600]}"
+            for i, m in enumerate(bank_matches)
+        ])
+        parts.append(
+            "[LỜI GIẢI MẪU THAM KHẢO — bám sát cách giải này nếu bài toán tương tự, "
+            f"KHÔNG chép nguyên văn, giải lại cho đúng đề của học sinh]\n{ctx}"
+        )
 
     if rag_chunks:
         context = "\n\n".join([
