@@ -4,11 +4,13 @@ from typing import List, Optional
 
 
 class ExtractedQuestion(BaseModel):
-    content: str                        
-    solution: Optional[str] = None      
-    problem_type: Optional[str] = None  
-    chapter: Optional[str] = None       
-    page: Optional[int] = None          
+    content: str
+    solution: Optional[str] = None
+    problem_type: Optional[str] = None
+    chapter: Optional[str] = None
+    page: Optional[int] = None
+    # Ảnh (bảng biến thiên/đồ thị) crop từ PDF, PNG base64. BE upload -> image_urls.
+    images: List[str] = []
 
 
 class ExtractPdfResponse(BaseModel):

@@ -1,22 +1,27 @@
 """
-Agent hội thoại Tutora — MỘT core dùng chung cho Zalo (sale) và Web (đa năng).
+Agent hội thoại Tutora — kiến trúc SLOT-FILLING (dùng chung Zalo sale + Web).
 
-KIẾN TRÚC (đọc trước khi sửa):
-- LLM (Gemini) lo HỘI THOẠI + Ý ĐỊNH: hiểu phụ huynh, quyết định gọi tool nào,
-  diễn đạt tiếng Việt. KHÔNG sinh quyết định nghiệp vụ/tiền bạc.
-- TOOL lo phần DETERMINISTIC: search gia sư (Ranking Core), FAQ (RAG). Mỗi tool
-  chỉ bọc code đã có sẵn — agent không "biết" cách tính ranking hay truy vấn DB.
-- BOOKING/PAYMENT: KHÔNG nằm trong agent. Khi phụ huynh muốn đặt lịch, agent set
-  cờ handoff_to_booking → NestJS chuyển sang deterministic booking flow. Tiền bạc
-  là nhị phân đúng/sai → không để LLM tự quyết. (Xem nhóm tool GĐ2 ở cuối file.)
+VÌ SAO SLOT-FILLING (đọc trước khi sửa):
+- Bản cũ để LLM (flash-lite) tự chọn tool qua function-calling + một loạt "gate hy vọng"
+  và "force config" để vá tật model. Kết quả: model hay bịa gia sư, hỏi lại điều đã biết,
+  im lặng. Mỗi bản vá đẻ lỗi mới.
+- Bản này TÁCH 2 TẦNG rõ ràng:
+    (1) CODE deterministic giữ STATE (slot) + quyết định "khi nào hỏi / khi nào search /
+        khi nào confirm". Đây là logic nghiệp vụ — KHÔNG phó mặc prompt.
+    (2) LLM chỉ làm 2 việc nó giỏi: TRÍCH slot/intent từ ngôn ngữ tự do, và DIỄN ĐẠT
+        tiếng Việt tự nhiên cho bước code đã chọn. LLM không tự quyết nghiệp vụ/tiền bạc.
 
-STATELESS: bên gọi (NestJS/Web) giữ history, gửi kèm mỗi request. Giống tutor_chat.
+SLOT (state, NestJS persist qua context_patch, gửi lại mỗi lượt — stateless như tutor_chat):
+    subject (môn) · grade (lớp) · goal (mục tiêu học) · preferences (mong muốn gia sư).
+Đủ subject + grade + goal → được phép search. Thiếu → hỏi đúng cái thiếu.
 
-Đây là SKELETON để review cấu trúc. Phần đánh dấu [STUB] cần hoàn thiện.
+BOOKING/PAYMENT: KHÔNG trong agent. Ý định đặt lịch → confirm → handoff_to_booking cho
+NestJS xử lý deterministic. Tiền là nhị phân đúng/sai, không để LLM quyết.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 
 import httpx
@@ -27,39 +32,33 @@ from google.genai import errors as genai_errors
 from ..core.config import get_settings
 from ..core.dependencies import get_gemini_client, get_supabase
 from ..models.schemas import AgentRequest, AgentResponse, AgentContextPatch, TutorChatFilters
-from .tutor_chat import _fetch_candidates, _get_subjects   # tái dùng: gọi .NET /recommend + /subjects
+from .tutor_chat import _fetch_candidates, _get_subjects
 from .rag import retrieve_chunks
 
 _settings = get_settings()
 
-# gemini-2.5-flash-lite: rẻ nhất, function-calling đủ tốt cho luồng sale.
-_MODEL = "gemini-2.5-flash-lite"
-_MAX_TURNS = 5  # guard: chặn vòng lặp tool vô hạn (agent gọi tool mãi không trả lời).
-# PHẢI khớp MAX_CARDS bên NestJS (zalo.handler) — số card gia sư thực render trên Zalo.
-# LLM chỉ giới thiệu đúng bấy nhiêu người để câu chữ khớp số card hiển thị.
+# gemini-2.5-flash: ổn định hơn hẳn lite ở trích JSON + hiểu ngữ cảnh tiếng Việt.
+# Luồng sale đáng tiền — bớt bịa/hỏi lại hơn nhiều so với flash-lite.
+_MODEL = "gemini-2.5-flash"
+# PHẢI khớp MAX_CARDS bên NestJS (agent.handler) — số card gia sư thực render trên Zalo.
 _MAX_CARDS_SHOWN = 2
-# Số từ tối thiểu trong 'query' để được phép recommend — gate tư vấn: buộc agent
-# thu thập đủ nhu cầu (mục tiêu + nhu cầu đặc thù) trước khi search, không bắn card sớm.
-_MIN_QUERY_WORDS = 6
 
-# Retry khi Gemini lỗi TẠM THỜI (503 quá tải / 429 / timeout) — lỗi phía Google,
-# không liên quan quota mình. Backoff tăng dần; hết retry -> raise để fallback graceful.
-_RETRY_DELAYS = [0.8, 2.0]   # 2 lần retry (tổng 3 lần thử)
+# Retry lỗi TẠM THỜI của Gemini (503 quá tải / 429 / timeout). Backoff tăng dần.
+_RETRY_DELAYS = [0.8, 2.0]
 _RETRYABLE = (genai_errors.ServerError, genai_errors.APIError)
 
 
-async def _generate_with_retry(gemini, contents, config):
-    """Gọi generate_content (sync) trong thread + retry lỗi tạm thời của Gemini."""
+async def _generate(contents, config):
+    """generate_content (sync) trong thread + retry lỗi tạm thời của Gemini."""
+    gemini = get_gemini_client()
     last_exc = None
     for attempt in range(len(_RETRY_DELAYS) + 1):
         try:
-            # generate_content là sync -> chạy trong thread để không block event loop.
             return await asyncio.to_thread(
                 gemini.models.generate_content, model=_MODEL, contents=contents, config=config,
             )
         except _RETRYABLE as e:
             code = getattr(e, "code", None)
-            # Chỉ retry lỗi tạm thời (5xx, 429). Lỗi 4xx khác (bad request) -> raise ngay.
             if code is not None and code < 500 and code != 429:
                 raise
             last_exc = e
@@ -68,101 +67,10 @@ async def _generate_with_retry(gemini, contents, config):
     raise last_exc
 
 
-# ───────────────────────── PERSONA / SYSTEM PROMPT ─────────────────────────
-# Một core, hai persona: Zalo = sale ngắn gọn; Web = trợ lý đa năng.
-# Tách theo channel để Web sau này thêm "Tutora là gì / chính sách" mà không đụng Zalo.
-_PERSONA = {
-    "zalo": (
-        "Em là trợ lý của Tutora trên Zalo, giúp phụ huynh tìm gia sư cho con.\n"
-        "GIỌNG ĐIỆU: xưng 'em', gọi phụ huynh là 'anh/chị'. Lễ phép, thân thiện, "
-        "tự nhiên như người Việt tư vấn thật. Có 'dạ', 'ạ' đúng mực (đừng lạm dụng). "
-        "Trả lời NGẮN GỌN (1-2 câu), tiếng Việt có dấu. Tránh dịch máy/cứng nhắc.\n"
-        "HIỂU Ý NGƯỜI DÙNG THEO NGỮ CẢNH (quan trọng nhất):\n"
-        "- Đọc cả lịch sử hội thoại để hiểu câu ngắn/chung chung. Vd phụ huynh trả lời 'ờ', "
-        "'được', 'ok', 'cũng được' NGAY SAU khi em vừa hỏi (vd 'xem chi tiết không ạ?') = "
-        "ĐỒNG Ý với câu em hỏi — làm theo, KHÔNG đi tìm gia sư mới.\n"
-        "- Chào hỏi/lạc đề ('alo', 'shop ơi', 'chào em'): chào lại thân thiện, hỏi anh/chị "
-        "cần tìm gia sư môn gì cho bé. KHÔNG trả 'em chưa có thông tin' cho câu chào.\n"
-        "TƯ VẤN TÌM GIA SƯ — HỎI SÂU TRƯỚC, GỢI Ý SAU (QUAN TRỌNG NHẤT):\n"
-        "- Em là NGƯỜI TƯ VẤN, không phải máy tra cứu. TUYỆT ĐỐI KHÔNG gợi ý gia sư ngay khi "
-        "phụ huynh mới nói môn + lớp. Phải HIỂU BÉ trước: chỉ có môn+lớp thì mọi phụ huynh nhận "
-        "cùng vài gia sư top rating — vô nghĩa, không phải tư vấn.\n"
-        "- TRƯỚC KHI gọi search_tutors, PHẢI thu thập đủ (hỏi tự nhiên, TỪNG CÂU MỘT, không dồn "
-        "hết 1 lượt): (1) MỤC TIÊU học — mất gốc / củng cố / nâng cao / ôn thi; (2) TÌNH TRẠNG "
-        "bé — học lực hiện tại, chỗ nào yếu, tiếp thu nhanh/chậm; (3) MONG MUỐN về gia sư — tính "
-        "cách (kiên nhẫn, nghiêm khắc), cách dạy, hoặc hình thức học (online/tại nhà). Hỏi 2-4 "
-        "lượt cho tự nhiên như đang trò chuyện, thể hiện sự quan tâm đến bé.\n"
-        "- Khi ĐÃ hiểu đủ -> tổng hợp toàn bộ nhu cầu thành 1 câu điền vào param 'query' rồi GỌI "
-        "search_tutors. Nếu gọi mà thiếu, tool trả 'error' nhắc hỏi thêm — làm theo, ĐỪNG bịa.\n"
-        "- CHỈ HỎI CÁI CÒN THIẾU, đừng lặp câu hỏi cũ. Đọc kỹ hội thoại, tích luỹ qua các lượt, "
-        "không bắt phụ huynh nhắc lại điều đã nói.\n"
-        "- Khi gợi ý -> giới thiệu ĐÚNG gia sư trong field 'shown' của kết quả (tối đa 2, đúng số "
-        "card). Mỗi người 1 dòng ngắn: tên + GIẢI THÍCH VÌ SAO hợp với nhu cầu cụ thể vừa nghe "
-        "(vd 'cô A kiên nhẫn, chuyên kèm bé mất gốc lấy lại căn bản' — nối với điều phụ huynh nói). "
-        "KHÔNG nói tổng số kiểu 'tìm được 10 gia sư' (phụ huynh chỉ thấy 2 thẻ).\n"
-        "- HỎI CHI TIẾT 1 GIA SƯ: khi phụ huynh hỏi sâu về MỘT gia sư (vd 'chi tiết thầy Đạt'), "
-        "CHỈ trả lời về gia sư ĐÓ. TUYỆT ĐỐI KHÔNG tự giới thiệu thêm gia sư khác, KHÔNG gợi ý "
-        "người mới (NestJS sẽ gửi lại card thừa). Chỉ thêm người khác khi phụ huynh YÊU CẦU.\n"
-        "ĐỊNH DẠNG TIN NHẮN (Zalo — RẤT QUAN TRỌNG):\n"
-        "- Zalo KHÔNG render markdown. TUYỆT ĐỐI KHÔNG dùng '**', '*', '#', '`', '-' đầu dòng, "
-        "không in đậm/nghiêng. Chỉ viết chữ thuần, xuống dòng bình thường.\n"
-        "- TUYỆT ĐỐI KHÔNG để lộ id kỹ thuật (vd 'seed-tutor-101', 'id=...') trong câu trả lời. "
-        "Chỉ gọi gia sư bằng TÊN. Phụ huynh không bao giờ thấy id.\n"
-        "- Thông tin chi tiết gia sư (ảnh, giá, đánh giá, nút đặt lịch) đã được hiển thị bằng "
-        "THẺ riêng bên dưới tin nhắn. Vì vậy trong câu chữ, em CHỈ giới thiệu ngắn gọn vì sao "
-        "hợp — KHÔNG liệt kê lại giá/đánh giá/số liệu (tránh trùng với thẻ).\n"
-        "ĐỔI MÔN / ĐỔI LỚP (chống gợi ý nhầm — RẤT QUAN TRỌNG):\n"
-        "- Khi phụ huynh đổi/thêm MÔN khác (vd đang Toán, hỏi 'gia sư Sinh'): sau khi xác nhận, "
-        "GỌI search_tutors và ĐIỀN param 'subject' = tên môn mới (vd 'Sinh học'). Đổi LỚP thì "
-        "điền 'grade_level' = số lớp (vd lớp 8 -> 8). PHẢI search lại — gia sư mỗi môn/lớp KHÁC nhau.\n"
-        "- TUYỆT ĐỐI KHÔNG lấy gia sư đã gợi ý ở môn trước gán sang môn mới. Mỗi gia sư chỉ dạy "
-        "đúng môn của họ. Chỉ giới thiệu gia sư CÓ trong kết quả search_tutors mới nhất. Nếu kết "
-        "quả rỗng thì nói chưa tìm được, KHÔNG bịa.\n"
-        "- Nếu search_tutors trả về field 'error': ĐỌC nội dung error và làm đúng theo đó "
-        "(vd 'chưa biết lớp' -> hỏi phụ huynh bé học lớp mấy; 'môn không có trong hệ thống' -> "
-        "nói thật Tutora chưa hỗ trợ môn đó). TUYỆT ĐỐI KHÔNG giới thiệu gia sư nào khi có error "
-        "(kể cả gia sư đã gợi ý trước đó), KHÔNG bịa thêm thông tin.\n"
-        "DÙNG TOOL:\n"
-        "- search_tutors: CHỈ gọi khi ĐÃ tư vấn đủ (hiểu mục tiêu + tình trạng bé + mong muốn "
-        "về gia sư) và tổng hợp được vào param 'query'. Điền 'subject'/'grade_level' khi đổi "
-        "môn/lớp. Gọi khi mới có môn+lớp là SAI — tool sẽ trả error nhắc hỏi thêm.\n"
-        "- get_tutor_detail: khi hỏi sâu về MỘT gia sư trong danh sách đã gợi ý "
-        "(bằng cấp, kinh nghiệm, phong cách dạy).\n"
-        "- get_tutor_availability: khi hỏi gia sư rảnh giờ nào / lịch trống.\n"
-        "- answer_faq: khi hỏi về Tutora (cách hoạt động, chính sách, giá chung).\n"
-        "- confirm_action: GỌI TRƯỚC khi đổi ngữ cảnh (đổi môn/lớp/bé/mục tiêu) hoặc khi "
-        "phụ huynh muốn đặt lịch. KHÔNG tự đổi tiêu chí, KHÔNG tự đặt lịch — luôn confirm trước.\n"
-        "CHỐNG BỊA — RẤT QUAN TRỌNG: thông tin về Tutora (cách hoạt động, chính sách, giá, "
-        "hoàn tiền...) CHỈ được lấy từ kết quả tool answer_faq. Nếu answer_faq trả về RỖNG "
-        "(không có passages), em PHẢI nói thật: 'Dạ phần này em chưa có thông tin, anh/chị "
-        "liên hệ hỗ trợ Tutora để được giải đáp chính xác giúp em nhé ạ' — TUYỆT ĐỐI KHÔNG "
-        "tự bịa câu trả lời từ kiến thức chung. Tương tự, không bịa thông tin gia sư, giá, lịch.\n"
-        "- Passages CÓ nhưng KHÔNG trả lời đúng câu hỏi (vd hỏi hoàn tiền mà passage chỉ nói "
-        "Tutora là gì): CHỈ trả lời phần passage thật sự cover; phần còn lại PHẢI nói rõ "
-        "'phần này em chưa có thông tin, anh/chị liên hệ hỗ trợ Tutora giúp em ạ'. KHÔNG lái "
-        "sang trả lời chuyện khác để né câu hỏi."
-    ),
-    "web": (
-        "Em là trợ lý của Tutora trên web. Xưng 'em', gọi người dùng là 'anh/chị', "
-        "lễ phép và tự nhiên như người Việt. Giúp phụ huynh tìm gia sư VÀ trả lời câu hỏi "
-        "chung về Tutora (Tutora là gì, cách hoạt động, chính sách). Tiếng Việt có dấu, rõ ràng. "
-        "Dùng tool search_tutors / get_tutor_detail / get_tutor_availability / answer_faq, "
-        "không bịa. KHÔNG tự xử lý đặt lịch/thanh toán."
-    ),
-}
-
-
-# Zalo không render markdown và không nên lộ id kỹ thuật. Persona đã dặn LLM,
-# nhưng strip thêm 1 lớp ở đây để chắc chắn (LLM đôi khi vẫn lỡ chèn).
-# Bắt mọi dạng id rò rỉ: "(id=seed-tutor-11)", "(ID: seed-tutor-11)", "id = abc-1",
-# và cả dạng KHÔNG có dấu tách: "ID seed-tutor-999" (chỉ có khoảng trắng).
-# Separator [:=]? optional -> gộp chung 2 case "có dấu" và "chỉ có space" vào 1 regex.
-# Ưu tiên xoá cả ngoặc trước; sau đó xoá dạng trần còn sót, giữ lại 1 space.
+# ───────────────────────── LÀM SẠCH TIN NHẮN (Zalo) ─────────────────────────
+# Zalo không render markdown; không được lộ id kỹ thuật. Persona đã dặn, strip thêm 1 lớp.
 _ID_LEAK_PAREN_RE = re.compile(r"\s*[\(\[]\s*id\s*[:=]?\s*[\w-]+\s*[\)\]]", re.IGNORECASE)
 _ID_LEAK_BARE_RE = re.compile(r"\bid\s*[:=]?\s*[\w-]{3,}\s*", re.IGNORECASE)
-# Lưới cuối: xoá token có HÌNH DẠNG tutor id bất kể văn cảnh (model có thể viết
-# 'id là "seed-tutor-999"' — chen từ/ngoặc giữa "id" và token khiến 2 regex trên hụt).
-# Bắt: seed-* (dev data) và UUID (production id). Kèm ngoặc kép/nháy bao quanh nếu có.
 _ID_TOKEN_RE = re.compile(
     r"[\"'“”]?\b(?:seed-[\w-]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b[\"'“”]?",
     re.IGNORECASE,
@@ -175,140 +83,125 @@ def _sanitize_reply(text: str) -> str:
     text = _ID_LEAK_PAREN_RE.sub("", text)
     text = _ID_LEAK_BARE_RE.sub("", text)
     text = _ID_TOKEN_RE.sub("", text)
-    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text) 
-    text = re.sub(r"\*([^*]+)\*", r"\1", text)       
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)
     text = text.replace("`", "")
-    text = re.sub(r"(?m)^\s*[#>]+\s*", "", text)     
-    text = re.sub(r"(?m)^\s*[-*]\s+", "", text)       
-    # Gọn khoảng trắng thừa do strip để lại.
+    text = re.sub(r"(?m)^\s*[#>]+\s*", "", text)
+    text = re.sub(r"(?m)^\s*[-*]\s+", "", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
-# ───────────────────────── KHAI BÁO TOOL (schema cho LLM) ─────────────────────────
-# Tool narrow, job-specific, schema rõ — LLM chỉ điền tham số, không biết internals.
-_TOOL_DECLS = [
-    types.FunctionDeclaration(
-        name="search_tutors",
-        description=(
-            "Tìm danh sách gia sư phù hợp theo tiêu chí phụ huynh nêu. "
-            "Gọi khi phụ huynh muốn tìm/xem gia sư hoặc đổi tiêu chí (giá, môn, giới tính)."
-        ),
-        parameters=types.Schema(
-            type=types.Type.OBJECT,
-            properties={
-                # query: BẮT BUỘC để tư vấn chất lượng — nhu cầu đặc thù + mục tiêu, dùng
-                # cho semantic rerank (embedding + pgvector). Gate ở code chặn search nếu
-                # query rỗng/hời hợt -> buộc agent hỏi đủ nhu cầu trước khi recommend.
-                "query": types.Schema(type=types.Type.STRING, description="BẮT BUỘC. Tổng hợp nhu cầu phụ huynh thành 1 câu tiếng Việt gồm: MỤC TIÊU học (mất gốc/củng cố/nâng cao/ôn thi) + ÍT NHẤT 1 nhu cầu đặc thù (tình trạng con, tính cách gia sư mong muốn như kiên nhẫn/nghiêm khắc, hình thức học, phương pháp). Vd: 'con lớp 8 mất gốc Toán, tiếp thu chậm, cần gia sư kiên nhẫn dạy lại từ căn bản, học online'. CHỈ điền khi ĐÃ hỏi đủ các thông tin này — nếu chưa đủ thì hỏi phụ huynh trước, ĐỪNG gọi tool."),
-                # subject: CHỈ điền khi phụ huynh ĐỔI/THÊM môn so với môn đang tư vấn.
-                # Không điền -> giữ môn hiện hành (context). Backend map tên -> subjectId.
-                "subject": types.Schema(type=types.Type.STRING, description="Tên môn học NẾU phụ huynh đổi/thêm môn (vd 'Toán', 'Ngữ văn', 'Sinh học', 'Hóa học'). KHÔNG điền nếu vẫn môn cũ."),
-                "grade_level": types.Schema(type=types.Type.INTEGER, description="Số lớp (1-12) NẾU phụ huynh đổi lớp (vd 'lớp 8' -> 8). KHÔNG điền nếu vẫn lớp cũ."),
-                "min_rate": types.Schema(type=types.Type.NUMBER, description="Giá tối thiểu VND/giờ nếu nêu (vd 'trên 150k' -> 150000)"),
-                "max_rate": types.Schema(type=types.Type.NUMBER, description="Giá tối đa VND/giờ nếu nêu (vd 'dưới 200k' -> 200000)"),
-                "tutor_gender": types.Schema(type=types.Type.STRING, enum=["male", "female"], description="Giới tính gia sư nếu nêu"),
-                "desired_count": types.Schema(type=types.Type.INTEGER, description="Số gia sư muốn xem nếu nêu (vd '1-2 người' -> 2)"),
-            },
-        ),
-    ),
-    types.FunctionDeclaration(
-        name="answer_faq",
-        description=(
-            "Tra cứu thông tin chung về Tutora (cách hoạt động, chính sách, giá chung, "
-            "Tutora là gì). Gọi khi phụ huynh hỏi câu KHÔNG phải về một gia sư cụ thể."
-        ),
-        parameters=types.Schema(
-            type=types.Type.OBJECT,
-            properties={
-                "question": types.Schema(type=types.Type.STRING, description="Câu hỏi của phụ huynh, nguyên văn"),
-            },
-            required=["question"],
-        ),
-    ),
-    types.FunctionDeclaration(
-        name="get_tutor_detail",
-        description=(
-            "Lấy thông tin chi tiết của MỘT gia sư cụ thể (mô tả, kinh nghiệm, học vấn, "
-            "đánh giá). Gọi khi phụ huynh hỏi sâu về một gia sư trong danh sách đã gợi ý "
-            "(vd 'cho xem kỹ gia sư A', 'gia sư thứ 2 dạy sao')."
-        ),
-        parameters=types.Schema(
-            type=types.Type.OBJECT,
-            properties={
-                "tutor_id": types.Schema(type=types.Type.STRING, description="ID gia sư — lấy từ danh sách đã gợi ý trong ngữ cảnh"),
-            },
-            required=["tutor_id"],
-        ),
-    ),
-    types.FunctionDeclaration(
-        name="get_tutor_availability",
-        description=(
-            "Lấy lịch rảnh / thời khoá biểu của một gia sư cụ thể. Gọi khi phụ huynh "
-            "hỏi gia sư rảnh khi nào, dạy được giờ nào, lịch trống ra sao."
-        ),
-        parameters=types.Schema(
-            type=types.Type.OBJECT,
-            properties={
-                "tutor_id": types.Schema(type=types.Type.STRING, description="ID gia sư — lấy từ danh sách đã gợi ý trong ngữ cảnh"),
-            },
-            required=["tutor_id"],
-        ),
-    ),
-    types.FunctionDeclaration(
-        name="confirm_action",
-        description=(
-            "GỌI tool này TRƯỚC khi thực hiện hành động NHẠY CẢM, để hỏi xác nhận phụ huynh:\n"
-            "- ĐỔI NGỮ CẢNH: phụ huynh muốn đổi môn / đổi lớp-cấp học / đổi sang bé khác / "
-            "đổi mục tiêu học (việc này sẽ tìm lại gia sư từ đầu).\n"
-            "- BOOKING: phụ huynh muốn đặt lịch / đăng ký học với một gia sư cụ thể.\n"
-            "KHÔNG tự đổi tiêu chí hay đặt lịch — luôn confirm trước. Sau khi gọi tool này, "
-            "DỪNG, chờ phụ huynh trả lời ở lượt sau."
-        ),
-        parameters=types.Schema(
-            type=types.Type.OBJECT,
-            properties={
-                "type": types.Schema(type=types.Type.STRING, enum=["context_change", "booking"], description="Loại hành động nhạy cảm"),
-                "question": types.Schema(type=types.Type.STRING, description="Câu hỏi xác nhận ngắn, giọng 'em' gọi 'anh/chị' (vd 'Dạ anh/chị muốn đổi sang môn Toán cho bé, đúng không ạ?')"),
-                "options": types.Schema(type=types.Type.ARRAY, items=types.Schema(type=types.Type.STRING), description="2-3 lựa chọn ngắn cho phụ huynh bấm (vd ['Đúng rồi', 'Không, giữ như cũ'])"),
-            },
-            required=["type", "question"],
-        ),
-    ),
-    # ───────── GĐ2 — BOOKING (chưa bật) ─────────
-    # Khi scale lên đặt lịch + QR trên Zalo, THÊM tool vào đây. Lưu ý phân vai:
-    #   create_booking_draft(tutor_id, date, time, sessions)
-    #         -> .NET tạo NHÁP + tự tính tiền (KHÔNG để LLM tính). Trả về tóm tắt + số tiền.
-    #   confirm_and_generate_qr(draft_id) -> CHỈ sau khi phụ huynh xác nhận deterministic;
-    #         payment service sinh QR, KHÔNG phải LLM. NestJS render ảnh QR gửi Zalo.
-    # Agent vẫn chỉ THU THẬP slot bằng hội thoại; chốt tiền là bước xác nhận có nút bấm.
+# ───────────────────────── GIỌNG / STYLE cho phần DIỄN ĐẠT ─────────────────────────
+_STYLE = (
+    "Em là trợ lý của Tutora, giúp phụ huynh tìm gia sư cho con. Xưng 'em', gọi phụ huynh "
+    "'anh/chị'. Lễ phép, thân thiện, tự nhiên như người Việt tư vấn thật; có 'dạ', 'ạ' đúng "
+    "mực (đừng lạm dụng). NGẮN GỌN 1-2 câu, tiếng Việt có dấu, tránh dịch máy. "
+    "Zalo KHÔNG render markdown: TUYỆT ĐỐI không dùng '**', '*', '#', '`', gạch đầu dòng, "
+    "không in đậm/nghiêng. Không để lộ id kỹ thuật — chỉ gọi gia sư bằng TÊN."
+)
+
+
+# ───────────────────────── (1) TRÍCH SLOT + INTENT ─────────────────────────
+# 1 LLM call → JSON. Đây là chỗ DUY NHẤT LLM "hiểu ý" phụ huynh. Không function-calling,
+# không để LLM quyết hành động — chỉ rút thông tin, code quyết ở bước sau.
+_INTENT_VALUES = [
+    "find_tutor",       # muốn tìm/xem gia sư (hoặc cung cấp thêm nhu cầu để tìm)
+    "tutor_detail",     # hỏi sâu về MỘT gia sư đã gợi ý
+    "availability",     # hỏi lịch rảnh/giá 1 gia sư đã gợi ý
+    "faq",              # hỏi về Tutora (chính sách, cách hoạt động, giá chung)
+    "booking",          # muốn đặt lịch / đăng ký học 1 gia sư
+    "change_context",   # đổi môn / đổi lớp / đổi bé / đổi mục tiêu (cần confirm)
+    "chitchat",         # chào hỏi / lạc đề / xác nhận ngắn ('ok','được')
 ]
 
 
-# ───────────────────────── HELPER GỌI .NET ─────────────────────────
-async def _dotnet_get(path: str) -> dict | None:
-    """GET .NET, trả content đã bóc {content: ...}. None nếu lỗi/không tìm thấy."""
-    url = f"{_settings.dotnet_be_url}{path}"
+def _extract_config(subjects_hint: str, slots: dict, shown_hint: str) -> types.GenerateContentConfig:
+    known = json.dumps({k: v for k, v in slots.items() if v}, ensure_ascii=False)
+    instruction = (
+        "Bạn là bộ TRÍCH THÔNG TIN cho trợ lý tìm gia sư Tutora. Đọc lịch sử hội thoại + tin "
+        "nhắn mới của phụ huynh, trả về DUY NHẤT một JSON (không giải thích, không markdown) "
+        "theo schema:\n"
+        '{"intent": <một trong ' + str(_INTENT_VALUES) + ">, "
+        '"subject": <tên môn nếu phụ huynh nêu/đổi, vd "Toán","Tiếng Anh","Ngữ văn"; null nếu không nhắc>, '
+        '"grade": <số lớp 1-12 nếu nêu/đổi; null nếu không nhắc>, '
+        '"goal": <mục tiêu học 1 cụm ngắn nếu nêu, vd "mất gốc","củng cố","nâng cao","ôn thi chuyển cấp","luyện SAT phần Toán"; null nếu không nhắc>, '
+        '"preferences": <mong muốn về gia sư 1 cụm ngắn nếu nêu, vd "kiên nhẫn","nghiêm khắc","học online"; null nếu không nhắc>, '
+        '"tutor_ref": <TÊN gia sư phụ huynh đang hỏi tới nếu có, lấy từ danh sách đã gợi ý; null nếu không>}\n\n'
+        "QUY TẮC QUAN TRỌNG:\n"
+        "- Ưu tiên đọc TIN NHẮN MỚI NHẤT của phụ huynh. Nếu tin nhắn mới có nêu môn/lớp/mục "
+        "tiêu/mong muốn thì PHẢI điền field tương ứng, KỂ CẢ khi nhiều thứ nằm chung 1 câu.\n"
+        "- BẮT LỚP RẤT KỸ: bất cứ khi nào có 'lớp <số>' hoặc 'con/bé lớp <số>' trong tin nhắn "
+        "mới → grade = <số> đó. Vd 'gia sư toán lớp 9 ôn thi' → subject='Toán', grade=9, "
+        "goal='ôn thi'. TUYỆT ĐỐI đừng bỏ sót lớp khi nó đứng chung câu với môn.\n"
+        "- CHỈ điền field khi phụ huynh THỰC SỰ nêu. KHÔNG bịa, KHÔNG suy diễn. Không nhắc = null.\n"
+        "- Đã biết sẵn từ các lượt trước (nếu tin nhắn mới KHÔNG nhắc lại và KHÔNG đổi thì để "
+        "null, hệ thống tự giữ giá trị cũ — đừng chép lại): " + known + ".\n"
+        "- MỤC TIÊU HIỂU RỘNG: 'luyện thi SAT/IELTS/TOEIC', 'thi HSG', 'ôn thi chuyển cấp', "
+        "'thi vào 10', 'thi THPTQG' đều là GOAL (mục tiêu), KHÔNG phải môn học. Vd 'luyện thi "
+        "SAT' → goal='luyện thi SAT' (KHÔNG phải subject). Nếu SAT/IELTS mà chưa rõ môn thì để "
+        "subject=null (bước sau sẽ hỏi).\n"
+        "- intent='tutor_detail'/'availability'/'booking' chỉ khi có gia sư đã gợi ý trước đó. "
+        "Danh sách gia sư đã gợi ý: " + (shown_hint or "chưa có") + ".\n"
+        "- Câu ngắn xác nhận ('ok','được','có','đúng rồi') ngay sau khi trợ lý vừa hỏi → "
+        "intent='chitchat' (đồng ý), KHÔNG phải find_tutor mới.\n"
+        "- Phụ huynh giục xem gia sư ('đưa tôi gia sư','có ai không','xem gia sư') → intent='find_tutor'.\n"
+        "Môn Tutora có: " + subjects_hint + "."
+    )
+    return types.GenerateContentConfig(
+        system_instruction=instruction,
+        temperature=0.1,
+        response_mime_type="application/json",
+    )
+
+
+async def _extract_turn(history_contents: list, message: str, slots: dict,
+                        subjects_hint: str, shown_hint: str) -> dict:
+    """Trả {intent, subject, grade, goal, preferences, tutor_ref}. Fallback an toàn nếu lỗi."""
+    contents = list(history_contents)
+    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=message)]))
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.get(url, headers={"Accept": "application/json"})
-            r.raise_for_status()
-            data = r.json()
-        return data.get("content", data)
+        resp = await _generate(contents, _extract_config(subjects_hint, slots, shown_hint))
+        data = json.loads((resp.text or "{}").strip())
     except Exception as e:
-        print(f"agent _dotnet_get {path} error: {e}")
-        return None
+        print(f"agent _extract_turn error: {e}")
+        # Không hiểu được → coi như muốn tìm gia sư, để luồng hỏi tiếp (an toàn).
+        return {"intent": "find_tutor"}
+    intent = data.get("intent")
+    if intent not in _INTENT_VALUES:
+        intent = "find_tutor"
+    return {
+        "intent": intent,
+        "subject": (data.get("subject") or None),
+        "grade": data.get("grade") if isinstance(data.get("grade"), int) else None,
+        "goal": (data.get("goal") or None),
+        "preferences": (data.get("preferences") or None),
+        "tutor_ref": (data.get("tutor_ref") or None),
+    }
 
 
-# ───────────────────────── THỰC THI TOOL (deterministic) ─────────────────────────
+# ───────────────────────── DIỄN ĐẠT (LLM sinh câu chữ 1 lượt) ─────────────────────────
+async def _say(task: str, history_contents: list | None = None) -> str:
+    """LLM sinh 1 câu tiếng Việt theo yêu cầu 'task'. Dùng cho hỏi thêm / giới thiệu / báo lỗi.
+    task đã chứa đủ dữ kiện; LLM chỉ diễn đạt, không tự bịa thêm thông tin."""
+    config = types.GenerateContentConfig(system_instruction=_STYLE, temperature=0.4)
+    contents = list(history_contents or [])
+    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=task)]))
+    try:
+        resp = await _generate(contents, config)
+        return _sanitize_reply((resp.text or "").strip())
+    except Exception as e:
+        print(f"agent _say error: {e}")
+        return ""
+
+
+# ───────────────────────── MAP TÊN → ID (.NET) ─────────────────────────
 async def _resolve_subject_id(subject_name: str | None) -> int | None:
-    """Map tên môn (LLM điền, vd 'Sinh học') -> subjectId qua /api/subjects. None nếu không khớp."""
     if not subject_name:
         return None
     subjects = await _get_subjects()
     norm = subject_name.strip().lower()
-    # Khớp chính xác trước, rồi khớp chứa (xử lý 'Sinh' vs 'Sinh Học', 'Văn' vs 'Ngữ văn').
     for s in subjects:
         if (s.get("subjectName") or "").strip().lower() == norm:
             return s.get("subjectId")
@@ -323,8 +216,7 @@ _grade_levels_cache: list[dict] = []
 
 
 async def _get_grade_levels() -> list[dict]:
-    """Lấy [{gradeLevelId, gradeName, levelOrder}] từ .NET; cache trong process.
-    gradeLevelId KHÔNG tuần tự theo lớp (vd Lớp 8 = id 56) -> phải map qua levelOrder."""
+    """[{gradeLevelId, gradeName, levelOrder}] từ .NET; cache. id KHÔNG tuần tự theo lớp."""
     global _grade_levels_cache
     if _grade_levels_cache:
         return _grade_levels_cache
@@ -333,339 +225,316 @@ async def _get_grade_levels() -> list[dict]:
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(url, headers={"Accept": "application/json"})
             r.raise_for_status()
-            data = r.json()
-        _grade_levels_cache = data.get("content", data) or []
+            _grade_levels_cache = r.json().get("content", []) or []
     except Exception as e:
         print(f"agent grade-levels fetch error: {e}")
     return _grade_levels_cache
 
 
 async def _resolve_grade_id(grade: int | None) -> int | None:
-    """Map số lớp (LLM điền, vd 8) -> gradeLevelId thật (vd 56) qua levelOrder. None nếu không khớp."""
     if not grade:
         return None
-    levels = await _get_grade_levels()
-    for g in levels:
+    for g in await _get_grade_levels():
         if g.get("levelOrder") == grade:
             return g.get("gradeLevelId")
     return None
 
 
-async def _search_tutors(args: dict, ctx, patch_out: dict) -> dict:
-    """Bọc _fetch_candidates (.NET /recommend). Trả tóm tắt cho LLM + full list để render.
-    Nếu LLM điền 'subject' (đổi/thêm môn) -> map sang id, cập nhật ctx + patch_out để
-    NestJS lưu (tránh kẹt môn cũ). 'grade_level_id' tương tự cho đổi lớp."""
-    # Đổi MÔN: LLM điền tên môn -> map id -> ghi đè ctx.subject_id (recommend filter đúng).
-    requested_subject = args.get("subject")
-    if requested_subject:
-        new_subject_id = await _resolve_subject_id(requested_subject)
-        if new_subject_id is None:
-            # Môn LLM điền không khớp môn nào trong hệ thống -> báo lỗi tường minh qua
-            # function_response thay vì âm thầm giữ ctx.subject_id cũ (tránh model bịa
-            # gia sư sai môn). Model tự đọc lỗi này và báo thật cho phụ huynh.
-            return {
-                "_full": [], "shown_count": 0, "shown": [],
-                "error": f"môn '{requested_subject}' không có trong hệ thống Tutora",
-            }
-        ctx.subject_id = new_subject_id
-        patch_out["subject_id"] = new_subject_id
-    # Đổi LỚP: LLM điền số lớp (1..12); map sang gradeLevelId thật (không tuần tự, vd Lớp 8=56).
-    requested_grade = args.get("grade_level")
-    if requested_grade:
-        new_grade_id = await _resolve_grade_id(requested_grade)
-        if new_grade_id is None:
-            return {
-                "_full": [], "shown_count": 0, "shown": [],
-                "error": f"lớp {requested_grade} không hợp lệ (chỉ hỗ trợ lớp 1-12)",
-            }
-        ctx.grade_level_id = new_grade_id
-        patch_out["grade_level_id"] = new_grade_id
+async def _dotnet_get(path: str) -> dict | None:
+    url = f"{_settings.dotnet_be_url}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(url, headers={"Accept": "application/json"})
+            r.raise_for_status()
+            data = r.json()
+        return data.get("content", data)
+    except Exception as e:
+        print(f"agent _dotnet_get {path} error: {e}")
+        return None
 
-    # Gate deterministic: LỚP là filter cứng — search không có lớp trả gia sư sai cấp
-    # học, gợi ý vô nghĩa. flash-lite hay search sớm dù persona đã cấm -> chặn ở code
-    # (persona chỉ là hope-based), trả lỗi hướng dẫn để model hỏi lại phụ huynh.
-    if ctx.grade_level_id is None:
-        return {
-            "_full": [], "shown_count": 0, "shown": [],
-            "error": "chưa biết bé học lớp mấy — hỏi phụ huynh LỚP của bé trước rồi mới tìm được gia sư đúng cấp học",
-        }
 
-    # Gate TƯ VẤN: chặn recommend cho tới khi thu thập đủ nhu cầu (mục tiêu + ≥1 nhu cầu
-    # đặc thù), tổng hợp trong 'query'. Không có gate này, flash-lite bắn card ngay khi
-    # mới có môn+lớp -> mọi phụ huynh nhận cùng top-rating, semantic ranking vô dụng.
-    # Heuristic: query phải >= _MIN_QUERY_WORDS từ (đủ chứa mục tiêu + 1 nhu cầu); câu
-    # cụt kiểu 'tìm gia sư Toán lớp 8' không qua được -> model buộc hỏi thêm.
-    query = (args.get("query") or "").strip()
-    if len(query.split()) < _MIN_QUERY_WORDS:
-        return {
-            "_full": [], "shown_count": 0, "shown": [],
-            "error": ("chưa đủ thông tin để tư vấn đúng người. HỎI phụ huynh (từng câu, tự nhiên): "
-                      "mục tiêu học của bé (mất gốc/củng cố/nâng cao/ôn thi), tình trạng hiện tại của bé, "
-                      "và mong muốn về gia sư (tính cách, cách dạy) hoặc hình thức học. "
-                      "Khi đã rõ, tổng hợp vào 'query' rồi mới gọi lại search_tutors."),
-        }
-
-    filters = TutorChatFilters(
-        min_rate=args.get("min_rate"),
-        max_rate=args.get("max_rate"),
-        tutor_gender=args.get("tutor_gender"),
-        desired_count=args.get("desired_count"),
-        subject_id=ctx.subject_id,  # truyền tường minh để recommend lọc đúng môn hiện hành
-    )
+# ───────────────────────── SEARCH GIA SƯ (deterministic) ─────────────────────────
+async def _run_search(ctx, query: str) -> tuple[list, list]:
+    """Gọi Ranking Core (.NET /recommend). Trả (full_list_để_render, shown_summary_cho_LLM)."""
+    filters = TutorChatFilters(subject_id=ctx.subject_id)
     try:
         content = await _fetch_candidates(ctx, filters, query=query)
         tutors = content.get("tutors", []) or []
-        # Thứ tự do Ranking Core quyết (Bayesian + blend) — KHÔNG re-sort đè lên.
-        # Chỉ khi core fail (aiRanked=false, .NET fallback SQL order) mới hạ gia sư
-        # 0-review xuống cuối làm lưới an toàn.
+        # Thứ tự do Ranking Core; chỉ khi core fail mới hạ gia sư 0-review xuống cuối.
         if not content.get("aiRanked"):
             tutors.sort(key=lambda t: (t.get("totalReviews") or 0) == 0)
     except Exception as e:
-        print(f"agent search_tutors error: {e}")
-        return {"_full": [], "count": 0, "error": "không tải được danh sách gia sư"}
-    # _full: list đầy đủ trả về client render card (KHÔNG đưa cho LLM, tránh tốn token).
-    # NestJS chỉ render _MAX_CARDS_SHOWN card đầu -> LLM chỉ được giới thiệu đúng bấy nhiêu người,
-    # nói đúng số đó (tránh "tìm được 10" trong khi chỉ hiện 2 -> phụ huynh confuse).
+        print(f"agent _run_search error: {e}")
+        return [], []
     shown = tutors[:_MAX_CARDS_SHOWN]
     summary = [
-        {"name": t.get("fullName") or t.get("name"), "rating": t.get("averageRating"),
+        {"name": t.get("fullName") or t.get("name"),
+         "rating": t.get("averageRating"),
          "rate": t.get("hourlyRate") or t.get("priceMin")}
         for t in shown
     ]
-    return {"_full": tutors, "shown_count": len(shown), "shown": summary}
+    return tutors, summary
 
 
-async def _answer_faq(args: dict, gemini: genai.Client) -> dict:
-    """Bọc retrieve_chunks trên KB Tutora. Trả các đoạn văn để LLM diễn đạt lại."""
-    try:
-        chunks, _ = await retrieve_chunks(
-            get_supabase(), None, args["question"],
-            gemini=gemini, subject="tutora_kb",   # KB riêng cho thông tin Tutora
-            # 0.6: chỉ lọc câu LẠC ĐỀ (đo thực tế: lạc đề ~0.45, cùng chủ đề ≥0.64).
-            # Passage có trả lời được câu hỏi không -> LLM quyết theo persona chống bịa.
-            min_similarity=0.6,
-        )
-    except Exception as e:
-        print(f"agent answer_faq error: {e}")
-        return {"passages": []}
-    return {"passages": [c.get("content") or c.get("text") for c in chunks]}
-
-
-async def _get_tutor_detail(args: dict, allowed_ids: set[str]) -> dict:
-    """Chi tiết 1 gia sư (.NET /full-profile). Chỉ cho phép id trong list đã gợi ý."""
-    tid = args.get("tutor_id")
-    if tid not in allowed_ids:
-        # Chặn LLM bịa id ngoài danh sách đã gợi ý.
-        return {"error": "gia sư này không có trong danh sách đã gợi ý"}
-    detail = await _dotnet_get(f"/api/tutors/{tid}/full-profile")
-    return detail or {"error": "không lấy được thông tin gia sư"}
-
-
-async def _get_tutor_availability(args: dict, allowed_ids: set[str]) -> dict:
-    """Lịch rảnh 1 gia sư (.NET /schedule). Chỉ cho phép id trong list đã gợi ý."""
-    tid = args.get("tutor_id")
-    if tid not in allowed_ids:
-        return {"error": "gia sư này không có trong danh sách đã gợi ý"}
-    sched = await _dotnet_get(f"/api/tutors/{tid}/schedule")
-    return sched or {"error": "không lấy được lịch gia sư"}
-
-
-async def _exec_tool(name: str, args: dict, ctx, gemini: genai.Client, allowed_ids: set[str], patch_out: dict) -> dict:
-    """Map function_call của LLM -> code thật. Trả dict (sẽ thành function_response)."""
-    if name == "search_tutors":
-        return await _search_tutors(args, ctx, patch_out)
-    if name == "answer_faq":
-        return await _answer_faq(args, gemini)
-    if name == "get_tutor_detail":
-        return await _get_tutor_detail(args, allowed_ids)
-    if name == "get_tutor_availability":
-        return await _get_tutor_availability(args, allowed_ids)
-    return {"error": f"unknown tool {name}"}
-
-
-# AGENT LOOP
+# ───────────────────────── AGENT (điều phối deterministic) ─────────────────────────
 async def run_agent(body: AgentRequest) -> AgentResponse:
-    """Vòng lặp function-calling: LLM quyết định -> ta thực thi tool -> trả kết quả -> lặp."""
-    gemini: genai.Client = get_gemini_client()
-    persona = _PERSONA.get(body.channel, _PERSONA["zalo"])
+    ctx = body.context
 
-    # List gia sư đã gợi ý turn trước -> để agent hiểu "gia sư A" là ai, và CHẶN bịa id.
-    allowed_ids: set[str] = {t.tutor_id for t in body.shown_tutors}
-    if body.shown_tutors:
-        shown = "; ".join(f"{t.name or '?'} (id={t.tutor_id})" for t in body.shown_tutors)
-        persona = persona + (
-            f"\n\nGia sư đã gợi ý cho phụ huynh (dùng đúng id khi gọi tool chi tiết/lịch): {shown}"
-        )
+    # Slot hiện có (từ context NestJS gửi kèm). subject_id/grade_level_id là id thật;
+    # goal/preferences là text. subject/grade "đọc được" (tên/số) suy ra khi cần hỏi.
+    slots = {
+        "subject_id": ctx.subject_id,
+        "grade_level_id": ctx.grade_level_id,
+        "goal": ctx.goal,
+        "preferences": ctx.preferences,
+    }
 
-    # Dựng history dạng Content (role user/model).
-    contents: list[types.Content] = [
+    # History → Content list (tái dùng cho cả trích slot lẫn diễn đạt).
+    history_contents: list[types.Content] = [
         types.Content(role=("user" if m.role == "user" else "model"),
                       parts=[types.Part.from_text(text=m.content)])
         for m in body.history
     ]
-    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=body.message)]))
 
-    # KHÔNG ép tool (AUTO): model TỰ HIỂU ý định + ngữ cảnh hội thoại rồi quyết định
-    # gọi tool hay trả lời/hỏi thêm. Câu chung chung ('ờ','được') không bị ép search;
-    # câu đủ ý ('tìm gia sư Toán lớp 8 ôn thi') thì tự gọi search. Linh hoạt, NLP thật.
-    config = types.GenerateContentConfig(
-        system_instruction=persona,
-        tools=[types.Tool(function_declarations=_TOOL_DECLS)],
-        temperature=0.3,
-        # automatic_function_calling tắt -> ta tự chạy loop để kiểm soát (gate booking, log).
-        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-    )
+    subjects = await _get_subjects()
+    subjects_hint = ", ".join(s.get("subjectName", "") for s in subjects)
+    # Tên môn/số lớp hiện tại (để nhắc LLM biết đã có gì, và để dựng câu hỏi tự nhiên).
+    cur_subject_name = next(
+        (s.get("subjectName") for s in subjects if s.get("subjectId") == ctx.subject_id), None)
+    cur_grade = None
+    if ctx.grade_level_id is not None:
+        for g in await _get_grade_levels():
+            if g.get("gradeLevelId") == ctx.grade_level_id:
+                cur_grade = g.get("levelOrder")
+                break
 
-    collected_tutors: list = []   # gom kết quả search để trả kèm response (render card)
-    forced_search = False          # đã ép search 1 lần chưa (vá tật flash-lite lười tool)
-    forced_confirm = False         # đã ép confirm_action 1 lần chưa (vá tật model tự bịa câu hỏi xác nhận)
-    used_tool = False              # đã thực thi tool nào chưa -> biết có cần ép sinh text tóm tắt khi reply rỗng
-    # Môn/lớp đổi giữa chat -> tích vào đây, trả về context_patch cho NestJS lưu.
+    allowed = {t.tutor_id: (t.name or "") for t in body.shown_tutors}
+    shown_hint = "; ".join(n for n in allowed.values() if n) if allowed else ""
+
+    slots_readable = {"subject": cur_subject_name, "grade": cur_grade,
+                      "goal": ctx.goal, "preferences": ctx.preferences}
+
+    # ── (1) TRÍCH slot + intent ──
+    ex = await _extract_turn(history_contents, body.message, slots_readable, subjects_hint, shown_hint)
+
     patch_out: dict = {}
 
-    def _patch() -> "AgentContextPatch | None":
+    def _patch():
         return AgentContextPatch(**patch_out) if patch_out else None
 
-    # Cấu hình ép GỌI search_tutors (mode ANY, chỉ tool này) — dùng khi model "nói sẽ tìm
-    # gia sư" nhưng không gọi tool (flash-lite ở AUTO hay lười). Giữ NLP của AUTO + đảm bảo search.
-    force_search_cfg = types.GenerateContentConfig(
-        system_instruction=persona,
-        tools=[types.Tool(function_declarations=_TOOL_DECLS)],
-        tool_config=types.ToolConfig(function_calling_config=types.FunctionCallingConfig(
-            mode=types.FunctionCallingConfigMode.ANY, allowed_function_names=["search_tutors"],
-        )),
-        temperature=0.3,
-        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-    )
-    def _should_force_search(model_text: str) -> bool:
-        # CHỈ ép search khi model TỰ NÓI SẼ TÌM (vd 'em tìm gia sư Toán...') mà quên gọi tool.
-        # KHÔNG ép khi: chào hỏi, đổi môn (phải confirm), đã liệt kê gia sư rồi, hay câu phủ định.
-        t = model_text.lower()
-        intends = ("em tìm gia sư" in t or "em sẽ tìm" in t or "em tìm cho" in t
-                   or "để em tìm" in t or "em tìm giúp" in t)
-        # nếu model đã liệt kê gia sư (có '- ' hoặc 'tìm được') thì KHÔNG phải bỏ lỡ tool
-        already_listed = "tìm được" in t or "\n- " in model_text or "gồm" in t
-        return intends and not already_listed
+    # ── Cập nhật slot từ thông tin mới rút được ──
+    # subject/grade → map sang id + ghi patch để NestJS persist. goal/preferences → text.
+    if ex["subject"]:
+        sid = await _resolve_subject_id(ex["subject"])
+        if sid is not None:
+            ctx.subject_id = sid
+            patch_out["subject_id"] = sid
+            cur_subject_name = ex["subject"]
+    if ex["grade"]:
+        gid = await _resolve_grade_id(ex["grade"])
+        if gid is not None:
+            ctx.grade_level_id = gid
+            patch_out["grade_level_id"] = gid
+            cur_grade = ex["grade"]
+    if ex["goal"]:
+        ctx.goal = ex["goal"]
+        patch_out["goal"] = ex["goal"]
+    if ex["preferences"]:
+        # Tích lũy mong muốn (nối, không đè) để không mất ý cũ — nhưng tránh nối trùng
+        # (extract đôi khi lặp lại preference cũ từ history).
+        new_pref = ex["preferences"].strip()
+        old = ctx.preferences or ""
+        if new_pref.lower() not in old.lower():
+            merged = " ; ".join(x for x in [old, new_pref] if x)
+            ctx.preferences = merged
+            patch_out["preferences"] = merged
 
-    # Cấu hình ép GỌI confirm_action — cùng pattern với force_search_cfg. Vá tật model
-    # tự bịa câu hỏi xác nhận bằng text thường thay vì gọi tool (mất cờ awaiting_confirmation/
-    # handoff_to_booking mà NestJS cần để render nút + chuyển luồng booking deterministic).
-    force_confirm_cfg = types.GenerateContentConfig(
-        system_instruction=persona,
-        tools=[types.Tool(function_declarations=_TOOL_DECLS)],
-        tool_config=types.ToolConfig(function_calling_config=types.FunctionCallingConfig(
-            mode=types.FunctionCallingConfigMode.ANY, allowed_function_names=["confirm_action"],
-        )),
-        temperature=0.3,
-        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-    )
+    intent = ex["intent"]
 
-    def _should_force_confirm(model_text: str) -> bool:
-        # Phát hiện model tự đặt câu hỏi xác nhận bằng text thay vì gọi confirm_action.
-        # Dấu hiệu câu hỏi xác nhận: "đúng không/ko", "phải không/ko", hoặc model tự nói
-        # đang xác nhận ("xác nhận lại", "xác nhận giúp em", "cho em xác nhận").
-        t = model_text.lower()
-        is_confirm_question = ("đúng không" in t or "đúng ko" in t or "phải không" in t
-                                or "phải ko" in t or "xác nhận" in t)
-        if not is_confirm_question:
-            return False
-        wants_context_change = (("đổi" in t or "chuyển" in t or "thay" in t)
-                                 and ("môn" in t or "lớp" in t or "bé" in t))
-        wants_booking = "đặt lịch" in t or "chốt" in t or "đăng ký học" in t
-        return wants_context_change or wants_booking
+    # ── (2) ĐIỀU PHỐI theo intent (code quyết, không phải LLM) ──
 
-    try:
-        for _ in range(_MAX_TURNS):
-            resp = await _generate_with_retry(gemini, contents, config)
+    # FAQ: RAG. Rỗng → câu an toàn, KHÔNG bịa.
+    if intent == "faq":
+        return await _handle_faq(body.message, history_contents, _patch())
 
-            calls = resp.function_calls or []
-            if not calls:
-                text = _sanitize_reply((resp.text or "").strip())
-                # Model tự bịa câu hỏi xác nhận bằng text thay vì gọi confirm_action -> ép gọi
-                # lại tool (mode=ANY, chỉ confirm_action) để lấy đúng type/question có cấu trúc,
-                # thay vì trả text rời rạc thiếu awaiting_confirmation/handoff_to_booking.
-                if (not forced_confirm and _should_force_confirm(text)):
-                    forced_confirm = True
-                    contents.append(resp.candidates[0].content)
-                    resp = await _generate_with_retry(gemini, contents, force_confirm_cfg)
-                    calls = resp.function_calls or []
-                # Model nói sẽ tìm gia sư mà KHÔNG gọi tool + chưa search lần nào -> ép search.
-                elif (not forced_search and not collected_tutors and _should_force_search(text)):
-                    forced_search = True
-                    contents.append(resp.candidates[0].content)
-                    resp = await _generate_with_retry(gemini, contents, force_search_cfg)
-                    calls = resp.function_calls or []
-                if not calls:
-                    # Model gọi tool xong (search / chi tiết / lịch rảnh) nhưng KHÔNG sinh
-                    # text tóm tắt -> reply rỗng, bot "im" với phụ huynh. Ép thêm 1 lượt yêu
-                    # cầu tóm tắt. Áp dụng cho MỌI tool (không chỉ search) -> nhánh hỏi chi
-                    # tiết/lịch rảnh cũng không bị đứt. `used_tool` = đã chạy tool ít nhất 1 lần.
-                    if not text and used_tool:
-                        contents.append(resp.candidates[0].content)
-                        follow_up = await _generate_with_retry(gemini, contents, config)
-                        follow_text = _sanitize_reply((follow_up.text or "").strip())
-                        if follow_text and not (follow_up.function_calls or []):
-                            text = follow_text
-                    # Fallback cuối: model vẫn im. Nếu có gia sư đã search -> tổng hợp tên;
-                    # nếu là nhánh chi tiết/lịch (không có list) -> câu an toàn chung.
-                    if not text and used_tool:
-                        names = [t.get("fullName") or t.get("name") for t in collected_tutors[:_MAX_CARDS_SHOWN] if t]
-                        if names:
-                            text = ("Dạ em tìm được gia sư " + " và ".join(n for n in names if n)
-                                    + " phù hợp ạ. Anh/chị xem chi tiết giúp em nhé!")
-                        else:
-                            text = "Dạ em đã kiểm tra xong, anh/chị cần em hỗ trợ thêm gì nữa không ạ?"
-                    return AgentResponse(reply=text, tutors=collected_tutors, context_patch=_patch())
+    # Hỏi chi tiết / lịch 1 gia sư đã gợi ý.
+    if intent in ("tutor_detail", "availability"):
+        return await _handle_tutor_query(intent, ex["tutor_ref"], allowed,
+                                         history_contents, _patch())
 
-            # confirm_action: điểm nhạy cảm (đổi ngữ cảnh / booking) -> DỪNG, hỏi xác nhận.
-            # Không thực hiện hành động; NestJS render nút, chờ phụ huynh bấm lượt sau.
-            confirm = next((c for c in calls if c.name == "confirm_action"), None)
-            if confirm:
-                args = dict(confirm.args or {})
-                ctype = args.get("type")
-                return AgentResponse(
-                    reply=args.get("question") or "Dạ anh/chị xác nhận giúp em nhé ạ?",
-                    tutors=collected_tutors,
-                    awaiting_confirmation=True,
-                    confirm_type=ctype,
-                    handoff_to_booking=(ctype == "booking"),
-                    suggestions=list(args.get("options") or []),
-                    context_patch=_patch(),
-                )
-
-            # Có tool call: append turn model + thực thi từng tool + append function_response.
-            used_tool = True
-            contents.append(resp.candidates[0].content)
-            tool_parts = []
-            for call in calls:
-                result = await _exec_tool(call.name, dict(call.args or {}), body.context, gemini, allowed_ids, patch_out)
-                # answer_faq rỗng -> trả thẳng câu fallback, KHÔNG phó mặc model tự xoay
-                # (flash-lite hay im lặng/bịa khi passages rỗng). Chống bịa chắc chắn.
-                if call.name == "answer_faq" and not (result.get("passages") or []):
-                    return AgentResponse(
-                        reply="Dạ phần này em chưa có thông tin ạ. Anh/chị liên hệ hỗ trợ Tutora để được giải đáp chính xác giúp em nhé!",
-                        tutors=collected_tutors,
-                    )
-                # _full = list gia sư đầy đủ để render card; KHÔNG gửi lại cho LLM (tốn token).
-                if call.name == "search_tutors":
-                    collected_tutors = result.pop("_full", []) or collected_tutors
-                    # Cho phép hỏi chi tiết gia sư vừa search ngay trong cùng phiên.
-                    allowed_ids |= {t.get("tutorId") or t.get("tutor_id") for t in collected_tutors if t}
-                tool_parts.append(types.Part.from_function_response(name=call.name, response=result))
-            contents.append(types.Content(role="user", parts=tool_parts))
-    except _RETRYABLE as e:
-        # Gemini lỗi tạm thời (503/429/timeout) cả sau retry -> fallback graceful,
-        # KHÔNG ném 500 cho NestJS (tránh bot "chết câm" với phụ huynh).
-        print(f"agent gemini error sau retry: {e}")
+    # Đổi ngữ cảnh (môn/lớp/bé/mục tiêu) → confirm trước khi tìm lại.
+    if intent == "change_context":
+        q = await _say(
+            "Phụ huynh muốn đổi tiêu chí tìm gia sư (môn/lớp/mục tiêu). Hãy hỏi 1 câu xác nhận "
+            "ngắn gọn, lịch sự, xác nhận thay đổi đó rồi mới tìm lại gia sư mới.",
+            history_contents)
         return AgentResponse(
-            reply="Dạ em xin lỗi, hệ thống đang hơi bận. Anh/chị nhắn lại giúp em sau giây lát nhé!",
-            tutors=collected_tutors,
+            reply=q or "Dạ anh/chị muốn đổi tiêu chí tìm gia sư, đúng không ạ?",
+            awaiting_confirmation=True, confirm_type="context_change",
+            suggestions=["Đúng rồi", "Không, giữ như cũ"], context_patch=_patch(),
         )
 
-    # Hết MAX_TURNS mà vẫn gọi tool -> trả lời an toàn thay vì lặp mãi.
+    # Đặt lịch → confirm → handoff booking (NestJS xử lý deterministic).
+    if intent == "booking":
+        q = await _say(
+            "Phụ huynh muốn đặt lịch học với gia sư. Hãy hỏi 1 câu xác nhận ngắn gọn, lịch sự "
+            "rằng anh/chị muốn đặt lịch, đúng không ạ.", history_contents)
+        return AgentResponse(
+            reply=q or "Dạ anh/chị muốn đặt lịch học với gia sư này, đúng không ạ?",
+            awaiting_confirmation=True, confirm_type="booking", handoff_to_booking=True,
+            suggestions=["Đúng, đặt lịch", "Chưa, xem thêm"], context_patch=_patch(),
+        )
+
+    # chitchat: chào / lạc đề / xác nhận ngắn → chào lại, gợi hỏi nhu cầu, KHÔNG search.
+    if intent == "chitchat":
+        r = await _say(
+            "Phụ huynh gửi câu chào hoặc câu ngắn không rõ nhu cầu tìm gia sư. Chào lại thân "
+            "thiện và hỏi anh/chị cần tìm gia sư môn gì, cho bé lớp mấy. KHÔNG nói 'chưa có thông tin'.",
+            history_contents)
+        return AgentResponse(reply=r or "Dạ em chào anh/chị ạ! Anh/chị cần tìm gia sư môn gì, "
+                             "cho bé lớp mấy để em hỗ trợ ạ?", context_patch=_patch())
+
+    # ── find_tutor: gate slot deterministic ──
+    return await _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
+                                    body.message, history_contents, allowed, _patch, patch_out)
+
+
+async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
+                             message, history_contents, allowed, patch_fn, patch_out) -> AgentResponse:
+    """Gate slot (subject+grade+goal) rồi search THẬT. Thiếu slot → hỏi đúng cái thiếu."""
+    # Thiếu môn → hỏi môn (kèm gợi ý map nếu là mục tiêu SAT/IELTS chưa rõ môn).
+    if ctx.subject_id is None:
+        # Nếu ĐÃ biết mục tiêu (vd 'luyện thi SAT') mà chưa rõ môn → gợi ý map mục tiêu về
+        # môn cụ thể ngay trong câu hỏi, tránh hỏi trống 'muốn môn gì' lặp lại vô duyên.
+        goal_hint = ""
+        if ctx.goal:
+            goal_hint = (
+                f"Phụ huynh đã nêu mục tiêu: '{ctx.goal}'. Đây là MỤC TIÊU, không phải môn — "
+                "Tutora tìm gia sư môn phổ thông để luyện mục tiêu đó (KHÔNG được nói Tutora "
+                "không có chương trình này). Gợi ý cụ thể môn phù hợp rồi hỏi bé muốn học môn "
+                "nào: SAT → phần Toán hoặc tiếng Anh; IELTS/TOEIC → tiếng Anh; thi HSG/chuyển "
+                "cấp/THPTQG → hỏi bé cần môn nào. ")
+        r = await _say(
+            "Chưa biết phụ huynh muốn tìm gia sư MÔN gì. " + goal_hint +
+            "Hỏi anh/chị cần tìm gia sư môn nào cho bé (1 câu, tự nhiên). "
+            f"Các môn Tutora có: {subjects_hint}.", history_contents)
+        return AgentResponse(reply=r or "Dạ anh/chị muốn tìm gia sư môn gì cho bé ạ?",
+                             context_patch=patch_fn())
+
+    # Thiếu lớp → hỏi lớp (LỚP là filter cứng, search thiếu lớp trả gia sư sai cấp).
+    if ctx.grade_level_id is None:
+        r = await _say(
+            f"Đã biết môn cần tìm là {cur_subject_name or 'môn đã chọn'} nhưng CHƯA biết bé học "
+            "lớp mấy. Hỏi anh/chị bé nhà mình đang học lớp mấy (chỉ hỏi lớp, đừng hỏi lại môn).",
+            history_contents)
+        return AgentResponse(reply=r or "Dạ bé nhà mình đang học lớp mấy ạ?", context_patch=patch_fn())
+
+    # Thiếu mục tiêu → hỏi mục tiêu (1 câu, để tư vấn trúng thay vì bắn top-rating).
+    if not ctx.goal:
+        r = await _say(
+            f"Đã biết cần gia sư {cur_subject_name or ''} lớp {cur_grade or ''}. Hỏi 1 câu ngắn "
+            "về MỤC TIÊU học của bé để tư vấn trúng: bé cần mất gốc/củng cố lại, nâng cao, hay "
+            "ôn thi (chuyển cấp/HSG/SAT...)? Chỉ hỏi mục tiêu, đừng hỏi lại môn/lớp.",
+            history_contents)
+        return AgentResponse(reply=r or "Dạ bé nhà mình học với mục tiêu gì ạ (củng cố, nâng cao "
+                             "hay ôn thi)?", context_patch=patch_fn())
+
+    # ── Đủ slot → SEARCH THẬT ──
+    query = ", ".join(x for x in [
+        f"{cur_subject_name} lớp {cur_grade}" if cur_subject_name else None,
+        ctx.goal, ctx.preferences,
+    ] if x)
+    tutors, shown = await _run_search(ctx, query)
+
+    if not tutors:
+        # Không có gia sư phù hợp → nói THẬT, KHÔNG bịa.
+        r = await _say(
+            f"Đã tìm nhưng CHƯA có gia sư {cur_subject_name or ''} lớp {cur_grade or ''} phù hợp "
+            "với nhu cầu của phụ huynh trong hệ thống. Nói thật điều này một cách lịch sự, và gợi "
+            "ý anh/chị thử nới tiêu chí hoặc để lại thông tin, em cập nhật sau. TUYỆT ĐỐI không "
+            "bịa ra tên gia sư nào.", history_contents)
+        return AgentResponse(
+            reply=r or "Dạ hiện em chưa tìm được gia sư phù hợp với tiêu chí này ạ. Anh/chị thử "
+            "nới tiêu chí giúp em nhé, hoặc em sẽ cập nhật khi có gia sư phù hợp ạ!",
+            tutors=[], context_patch=patch_fn())
+
+    # Có gia sư → LLM giới thiệu ĐÚNG những người trong 'shown' (không bịa, không nói tổng số).
+    names_json = json.dumps(shown, ensure_ascii=False)
+    r = await _say(
+        "Đã tìm được gia sư phù hợp. Giới thiệu NGẮN GỌN cho phụ huynh đúng những gia sư trong "
+        f"danh sách sau (chỉ dùng đúng các tên này, KHÔNG thêm ai khác, KHÔNG bịa): {names_json}. "
+        "Mỗi người 1 dòng: tên + 1 lý do ngắn hợp với nhu cầu "
+        f"({ctx.goal}{'; ' + ctx.preferences if ctx.preferences else ''}). KHÔNG nói tổng số tìm "
+        "được, KHÔNG liệt kê lại giá/đánh giá (đã có thẻ riêng bên dưới). Mời anh/chị xem thẻ chi tiết.",
+        history_contents)
     return AgentResponse(
-        reply="Dạ em cần thêm chút thông tin ạ. Anh/chị mô tả lại nhu cầu giúp em nhé?",
-        tutors=collected_tutors,
-        handoff_to_booking=False,
-        context_patch=_patch(),
-    )
+        reply=r or "Dạ em tìm được vài gia sư phù hợp, anh/chị xem thẻ chi tiết bên dưới giúp em nhé ạ!",
+        tutors=tutors, context_patch=patch_fn())
+
+
+async def _handle_faq(question: str, history_contents, patch) -> AgentResponse:
+    """RAG trên KB Tutora. Rỗng → câu an toàn, chống bịa tuyệt đối."""
+    try:
+        chunks, _ = await retrieve_chunks(
+            get_supabase(), None, question,
+            gemini=get_gemini_client(), subject="tutora_kb", min_similarity=0.6,
+        )
+    except Exception as e:
+        print(f"agent faq error: {e}")
+        chunks = []
+    passages = [c.get("content") or c.get("text") for c in chunks]
+    passages = [p for p in passages if p]
+    if not passages:
+        return AgentResponse(
+            reply="Dạ phần này em chưa có thông tin ạ. Anh/chị liên hệ hỗ trợ Tutora để được "
+            "giải đáp chính xác giúp em nhé!", context_patch=patch)
+    ctx_text = "\n".join(f"- {p}" for p in passages)
+    r = await _say(
+        f"Phụ huynh hỏi: \"{question}\". Trả lời DỰA HOÀN TOÀN vào thông tin sau, KHÔNG bịa "
+        f"thêm ngoài đây:\n{ctx_text}\nNếu thông tin trên KHÔNG trả lời được câu hỏi, nói thật là "
+        "phần này chưa có thông tin, mời anh/chị liên hệ hỗ trợ Tutora.", history_contents)
+    return AgentResponse(reply=r or "Dạ anh/chị liên hệ hỗ trợ Tutora để được giải đáp giúp em nhé ạ!",
+                         context_patch=patch)
+
+
+async def _handle_tutor_query(intent: str, tutor_ref: str | None, allowed: dict,
+                              history_contents, patch) -> AgentResponse:
+    """Chi tiết / lịch 1 gia sư đã gợi ý. Chỉ cho phép gia sư trong danh sách đã shown."""
+    if not allowed:
+        r = await _say(
+            "Phụ huynh hỏi chi tiết/lịch của một gia sư, nhưng em CHƯA gợi ý gia sư nào (chưa "
+            "search). Mời anh/chị cho biết nhu cầu để em tìm gia sư trước đã.", history_contents)
+        return AgentResponse(reply=r or "Dạ để em tìm gia sư phù hợp trước, anh/chị cho em biết "
+                             "cần môn gì, bé lớp mấy ạ?", context_patch=patch)
+
+    # Khớp tên phụ huynh nhắc → tutor_id. Không rõ → lấy người đầu danh sách đã shown.
+    tid = None
+    if tutor_ref:
+        ref = tutor_ref.strip().lower()
+        for i, name in allowed.items():
+            if name and (ref in name.lower() or name.lower() in ref):
+                tid = i
+                break
+    if tid is None:
+        tid = next(iter(allowed))
+
+    if intent == "tutor_detail":
+        data = await _dotnet_get(f"/api/tutors/{tid}/full-profile")
+        topic = "thông tin chi tiết (kinh nghiệm, học vấn, phong cách dạy)"
+    else:
+        data = await _dotnet_get(f"/api/tutors/{tid}/schedule")
+        topic = "lịch rảnh / thời gian có thể dạy"
+    tutor_name = allowed.get(tid) or "gia sư"
+
+    if not data:
+        return AgentResponse(
+            reply=f"Dạ em chưa lấy được {topic} của {tutor_name} ngay lúc này ạ. Anh/chị chờ em "
+            "chút hoặc thử lại giúp em nhé!", context_patch=patch)
+
+    data_text = json.dumps(data, ensure_ascii=False)[:2500]
+    r = await _say(
+        f"Phụ huynh hỏi {topic} của gia sư {tutor_name}. Diễn đạt lại NGẮN GỌN, tự nhiên cho phụ "
+        f"huynh dựa trên dữ liệu sau (KHÔNG bịa ngoài đây, KHÔNG lộ id/trường kỹ thuật):\n{data_text}",
+        history_contents)
+    return AgentResponse(
+        reply=r or f"Dạ để em gửi anh/chị thông tin của {tutor_name} ạ.", context_patch=patch)
