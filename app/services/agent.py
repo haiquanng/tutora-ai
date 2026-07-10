@@ -144,8 +144,15 @@ def _extract_config(subjects_hint: str, slots: dict, shown_hint: str) -> types.G
         "subject=null (bước sau sẽ hỏi).\n"
         "- intent='tutor_detail'/'availability'/'booking' chỉ khi có gia sư đã gợi ý trước đó. "
         "Danh sách gia sư đã gợi ý: " + (shown_hint or "chưa có") + ".\n"
-        "- Câu ngắn xác nhận ('ok','được','có','đúng rồi') ngay sau khi trợ lý vừa hỏi → "
-        "intent='chitchat' (đồng ý), KHÔNG phải find_tutor mới.\n"
+        "- XÁC NHẬN ĐỔI MÔN/LỚP (quan trọng): nếu tin nhắn TRƯỚC của trợ lý là câu hỏi xác "
+        "nhận đổi sang môn/lớp cụ thể (vd 'anh/chị muốn tìm gia sư Tiếng Anh, đúng không ạ?') "
+        "thì:\n"
+        "    · PH ĐỒNG Ý ('đúng rồi','đúng','ừ','ok','vâng','phải') → intent='find_tutor' VÀ "
+        "điền subject/grade = ĐÚNG môn/lớp mà trợ lý vừa hỏi xác nhận (đọc từ câu hỏi đó).\n"
+        "    · PH TỪ CHỐI ('không','giữ như cũ','thôi') → intent='chitchat', subject=null, "
+        "grade=null (giữ nguyên môn/lớp cũ, KHÔNG đổi).\n"
+        "- Câu ngắn xác nhận ('ok','được','có','đúng rồi') sau khi trợ lý hỏi chuyện KHÁC (không "
+        "phải đổi môn/lớp) → intent='chitchat'.\n"
         "- Phụ huynh giục xem gia sư ('đưa tôi gia sư','có ai không','xem gia sư') → intent='find_tutor'.\n"
         "Môn Tutora có: " + subjects_hint + "."
     )
@@ -322,20 +329,45 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
     def _patch():
         return AgentContextPatch(**patch_out) if patch_out else None
 
+    # ── Phát hiện ĐỔI môn/lớp (cần confirm trước khi tìm lại) ──
+    # Nếu môn/lớp mới KHÁC môn/lớp đang có VÀ đã từng gợi ý gia sư → đây là đổi ngữ cảnh,
+    # phải hỏi xác nhận (tránh tìm nhầm khi PH lỡ tay). Bắt ở tầng code cho chắc — extract
+    # hay phân "cho tôi gia sư Anh thay vì Toán" thành find_tutor. CHƯA áp patch ở nhánh này.
+    new_sid = await _resolve_subject_id(ex["subject"]) if ex["subject"] else None
+    new_gid = await _resolve_grade_id(ex["grade"]) if ex["grade"] else None
+    switching_subject = new_sid is not None and ctx.subject_id is not None and new_sid != ctx.subject_id
+    switching_grade = new_gid is not None and ctx.grade_level_id is not None and new_gid != ctx.grade_level_id
+    # Lượt này CÓ PHẢI câu trả lời xác nhận đổi ngữ cảnh không? Nếu tin nhắn model gần nhất
+    # là câu hỏi xác nhận ('đúng không ạ') → PH đang trả lời confirm, KHÔNG hỏi lại lần nữa
+    # (tránh vòng lặp confirm). Cho áp patch + search luôn ở dưới.
+    last_model_msg = next((m.content for m in reversed(body.history) if m.role != "user"), "")
+    answering_confirm = ("đúng không" in last_model_msg.lower()
+                         or "đúng ko" in last_model_msg.lower())
+    if (switching_subject or switching_grade) and body.shown_tutors and not answering_confirm:
+        what = "môn" if switching_subject else "lớp"
+        target = ex["subject"] if switching_subject else f"lớp {ex['grade']}"
+        q = await _say(
+            f"Phụ huynh muốn đổi {what} sang {target} (khác với đang tìm). Hỏi 1 câu xác nhận "
+            "ngắn gọn, lịch sự rằng anh/chị muốn chuyển sang tìm gia sư mới cho lựa chọn này, "
+            "đúng không ạ.", history_contents)
+        # KHÔNG áp patch ở đây: nếu PH nói "không, giữ như cũ" thì môn/lớp cũ phải nguyên vẹn.
+        # Lượt sau PH xác nhận ("đúng rồi") → extract rút lại môn/lớp mới → áp patch + search.
+        return AgentResponse(
+            reply=q or f"Dạ anh/chị muốn đổi sang {target} và tìm gia sư mới, đúng không ạ?",
+            tutors=[], awaiting_confirmation=True, confirm_type="context_change",
+            suggestions=["Đúng rồi", "Không, giữ như cũ"],
+        )
+
     # ── Cập nhật slot từ thông tin mới rút được ──
     # subject/grade → map sang id + ghi patch để NestJS persist. goal/preferences → text.
-    if ex["subject"]:
-        sid = await _resolve_subject_id(ex["subject"])
-        if sid is not None:
-            ctx.subject_id = sid
-            patch_out["subject_id"] = sid
-            cur_subject_name = ex["subject"]
-    if ex["grade"]:
-        gid = await _resolve_grade_id(ex["grade"])
-        if gid is not None:
-            ctx.grade_level_id = gid
-            patch_out["grade_level_id"] = gid
-            cur_grade = ex["grade"]
+    if new_sid is not None:
+        ctx.subject_id = new_sid
+        patch_out["subject_id"] = new_sid
+        cur_subject_name = ex["subject"]
+    if new_gid is not None:
+        ctx.grade_level_id = new_gid
+        patch_out["grade_level_id"] = new_gid
+        cur_grade = ex["grade"]
     if ex["goal"]:
         ctx.goal = ex["goal"]
         patch_out["goal"] = ex["goal"]

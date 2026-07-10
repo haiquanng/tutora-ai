@@ -2,9 +2,13 @@
 Extract câu hỏi từ PDF bằng Gemini (đọc PDF trực tiếp).
 
 Staff upload PDF -> Gemini đọc -> list câu {content, solution, problem_type,
-chapter, page, figures}. figures = vùng chứa hình (bảng biến thiên/đồ thị) do
-Gemini định vị; PyMuPDF render vùng đó thành PNG (base64) để BE upload + gắn
-image_urls vào câu.
+chapter, page, has_figure}.
+
+CROP HÌNH: KHÔNG để Gemini đoán toạ độ pixel (LLM rất kém việc này -> crop lệch).
+Thay vào đó dùng PyMuPDF dò VÙNG HÌNH THẬT trên trang (ảnh raster qua
+get_image_rects, bảng qua find_tables, cụm vector qua get_drawings) rồi gán cho
+câu có has_figure theo thứ tự đọc (y) trên trang. Toạ độ đọc thẳng từ cấu trúc
+PDF nên chính xác tuyệt đối. (Đây là cách MinerU/Docling/PyMuPDF4LLM làm.)
 
 Dùng response_schema để LaTeX (backslash) escape đúng, không vỡ JSON.
 KHÔNG embed ở đây.
@@ -38,29 +42,14 @@ Với MỖI câu hỏi, trả về:
 - problem_type: "tu_luan" | "trac_nghiem" | "dien_so".
 - chapter: chọn ĐÚNG 1 tên từ danh sách nếu khớp, không khớp để rỗng:
   {_CHAPTERS}
-- page: số trang chứa câu (0-based, trang đầu = 0).
-- figures: danh sách vùng chứa HÌNH ẢNH (bảng biến thiên, đồ thị, hình vẽ) của câu
-  đó. Mỗi figure có tọa độ theo hệ pixel của trang PDF (gốc trên-trái):
-  {{"page": số trang 0-based, "x": trái, "y": trên, "width": rộng, "height": cao,
-    "page_width": chiều rộng trang, "page_height": chiều cao trang}}.
-  Câu KHÔNG có hình -> figures = [].
+- page: số trang chứa câu (0-based, trang đầu = 0). BẮT BUỘC đúng trang.
+- has_figure: true nếu câu có HÌNH ẢNH đi kèm (bảng biến thiên, đồ thị, hình vẽ,
+  hình học); false nếu chỉ có chữ + công thức. KHÔNG tự đoán toạ độ — chỉ cần cờ này.
 
 QUY TẮC:
 - Giữ NGUYÊN VĂN, KHÔNG bịa câu không có trong PDF.
-- Tách riêng từng câu; chỉ đánh figures cho câu THẬT SỰ có hình vẽ."""
-
-_FIGURE = types.Schema(
-    type=types.Type.OBJECT,
-    properties={
-        "page": types.Schema(type=types.Type.INTEGER),
-        "x": types.Schema(type=types.Type.NUMBER),
-        "y": types.Schema(type=types.Type.NUMBER),
-        "width": types.Schema(type=types.Type.NUMBER),
-        "height": types.Schema(type=types.Type.NUMBER),
-        "page_width": types.Schema(type=types.Type.NUMBER),
-        "page_height": types.Schema(type=types.Type.NUMBER),
-    },
-)
+- Trả các câu THEO ĐÚNG THỨ TỰ xuất hiện trong PDF (trên xuống dưới, trái qua phải).
+- Chỉ đặt has_figure=true cho câu THẬT SỰ có hình vẽ (không tính công thức LaTeX)."""
 
 _SCHEMA = types.Schema(
     type=types.Type.ARRAY,
@@ -73,30 +62,77 @@ _SCHEMA = types.Schema(
             "problem_type": types.Schema(type=types.Type.STRING),
             "chapter": types.Schema(type=types.Type.STRING),
             "page": types.Schema(type=types.Type.INTEGER),
-            "figures": types.Schema(type=types.Type.ARRAY, items=_FIGURE),
+            "has_figure": types.Schema(type=types.Type.BOOLEAN),
         },
     ),
 )
 
 
-def _crop_figure(doc: fitz.Document, fig: dict) -> str | None:
-    """Render vùng figure thành PNG base64. Tọa độ Gemini theo page_width/height
-    của nó -> scale về tọa độ thật của trang PDF."""
+def _cluster_rects(rects: list, gap: float = 12.0) -> list:
+    """Gom các rect gần nhau (giao hoặc cách < gap px) thành cụm lớn — dùng để
+    ghép các nét vector rời rạc (đồ thị, hình vẽ) thành 1 vùng hình."""
+    boxes = [fitz.Rect(r) for r in rects if fitz.Rect(r).width > 3 and fitz.Rect(r).height > 3]
+    merged = True
+    while merged:
+        merged = False
+        out: list = []
+        while boxes:
+            b = boxes.pop()
+            grew = True
+            while grew:
+                grew = False
+                rest: list = []
+                for o in boxes:
+                    be = fitz.Rect(b)
+                    be.x0 -= gap; be.y0 -= gap; be.x1 += gap; be.y1 += gap
+                    if be.intersects(o):
+                        b |= o
+                        grew = True
+                        merged = True
+                    else:
+                        rest.append(o)
+                boxes = rest
+            out.append(b)
+        boxes = out
+    return boxes
+
+
+def _detect_figure_regions(page: fitz.Page) -> list:
+    """Vùng hình THẬT trên trang (toạ độ đọc thẳng từ PDF, không đoán):
+    ảnh raster + bảng + cụm vector drawing đủ lớn. Trả list Rect theo thứ tự đọc."""
+    regions: list = []
+    # 1. Ảnh raster nhúng (bbox chính xác tuyệt đối).
+    for im in page.get_images():
+        regions += list(page.get_image_rects(im[0]))
+    # 2. Bảng (bảng biến thiên kẻ line).
     try:
-        page = doc[int(fig.get("page", 0))]
-        pw = float(fig.get("page_width") or page.rect.width)
-        ph = float(fig.get("page_height") or page.rect.height)
-        sx = page.rect.width / pw if pw else 1.0
-        sy = page.rect.height / ph if ph else 1.0
-        x0 = float(fig["x"]) * sx
-        y0 = float(fig["y"]) * sy
-        x1 = (float(fig["x"]) + float(fig["width"])) * sx
-        y1 = (float(fig["y"]) + float(fig["height"])) * sy
-        # nới nhẹ 4px cho đỡ cắt sát, kẹp trong trang
-        rect = fitz.Rect(x0 - 4, y0 - 4, x1 + 4, y1 + 4) & page.rect
-        if rect.is_empty or rect.width < 8 or rect.height < 8:
+        for t in page.find_tables().tables:
+            regions.append(fitz.Rect(t.bbox))
+    except Exception:
+        pass
+    # 3. Vector drawings -> cluster (đồ thị, hình vẽ tay). Bỏ cụm quá nhỏ (gạch chân, nét lẻ).
+    clusters = _cluster_rects([d["rect"] for d in page.get_drawings()])
+    for c in clusters:
+        if c.width >= 60 and c.height >= 40:
+            regions.append(c)
+    # Dedup: bỏ region nằm gọn (>80% diện tích) trong region lớn hơn.
+    regions = sorted(regions, key=lambda r: -r.get_area())
+    keep: list = []
+    for r in regions:
+        if r.get_area() > 0 and not any((r & k).get_area() > 0.8 * r.get_area() for k in keep):
+            keep.append(r)
+    # Sắp theo thứ tự đọc (trên xuống, trái qua phải).
+    keep.sort(key=lambda r: (round(r.y0), r.x0))
+    return keep
+
+
+def _crop_rect(page: fitz.Page, rect: fitz.Rect) -> str | None:
+    """Render 1 vùng thành PNG base64, nới nhẹ 4px cho đỡ cắt sát."""
+    try:
+        r = fitz.Rect(rect.x0 - 4, rect.y0 - 4, rect.x1 + 4, rect.y1 + 4) & page.rect
+        if r.is_empty or r.width < 8 or r.height < 8:
             return None
-        pix = page.get_pixmap(clip=rect, dpi=150)
+        pix = page.get_pixmap(clip=r, dpi=150)
         return base64.b64encode(pix.tobytes("png")).decode()
     except Exception:
         return None
@@ -122,16 +158,44 @@ async def extract_pdf(client: genai.Client, pdf_bytes: bytes) -> ExtractPdfRespo
         raw = json.loads(response.text)
 
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        # Dò sẵn vùng hình thật cho từng trang (1 lần/trang).
+        page_regions: dict[int, list] = {}
+
+        def regions_for(pno: int) -> list:
+            if pno not in page_regions:
+                page_regions[pno] = _detect_figure_regions(doc[pno])
+            return page_regions[pno]
+
+        # Con trỏ vùng hình đã dùng trên mỗi trang -> nhiều câu có hình cùng trang
+        # nhận vùng theo thứ tự đọc.
+        used: dict[int, int] = {}
+
+        def resolve_page(pno: int) -> int | None:
+            """Trang thật còn vùng hình chưa dùng. Gemini hay trả số trang theo
+            NHÃN in trên tài liệu (vd 'Page 8') thay vì index 0-based của file đã
+            tách -> nếu ngoài range hoặc hết hình, dò trang khác còn hình."""
+            if 0 <= pno < len(doc) and used.get(pno, 0) < len(regions_for(pno)):
+                return pno
+            for p in range(len(doc)):
+                if used.get(p, 0) < len(regions_for(p)):
+                    return p
+            return None
+
         questions = []
         for q in raw:
             content = (q.get("content") or "").strip()
             if not content:
                 continue
             images = []
-            for fig in (q.get("figures") or []):
-                png_b64 = _crop_figure(doc, fig)
-                if png_b64:
-                    images.append(png_b64)
+            if q.get("has_figure"):
+                pno = resolve_page(int(q.get("page") or 0))
+                if pno is not None:
+                    regs = regions_for(pno)
+                    idx = used[pno] = used.get(pno, 0)
+                    png_b64 = _crop_rect(doc[pno], regs[idx])
+                    if png_b64:
+                        images.append(png_b64)
+                    used[pno] = idx + 1
             questions.append(ExtractedQuestion(
                 content=content,
                 solution=(q.get("solution") or "").strip() or None,
