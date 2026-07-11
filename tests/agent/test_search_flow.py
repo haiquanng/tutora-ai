@@ -1,18 +1,21 @@
-"""Kịch bản search_tutors theo triết lý TƯ VẤN TRƯỚC, RECOMMEND SAU.
+"""Kịch bản search theo gate "HỎI 1 LẦN, MỀM" (agents/agentscenarios.md KB-A bước 4).
 
-Agent KHÔNG được bắn card ngay khi mới có môn+lớp — phải hỏi đủ nhu cầu (mục tiêu +
-tình trạng bé + mong muốn gia sư) rồi mới recommend. Gate cứng trong _search_tutors
-enforce điều này (chặn nếu 'query' nhu cầu chưa đủ dài)."""
+Bắt buộc cứng: subject + grade + goal. Sau đó agent hỏi GỘP đúng 1 lượt tuỳ chọn
+(hình thức học + mong muốn về gia sư) rồi search — PH không có yêu cầu ("sao cũng
+được") thì vẫn search, KHÔNG hỏi lại lần 2. PH giục → search ngay, bỏ câu hỏi mềm."""
 import pytest
 
 pytestmark = pytest.mark.agent
 
 
 def test_moi_co_mon_lop_thi_hoi_them_khong_ban_card(agent):
-    """Môn + lớp + mục tiêu ngắn gọn -> CHƯA đủ để tư vấn -> phải hỏi thêm, KHÔNG recommend."""
+    """Đủ 3 slot cứng nhưng CHƯA hỏi lượt gộp tuỳ chọn -> hỏi 1 câu (mong muốn thêm),
+    CHƯA recommend lượt này. Lượt sau mới search dù PH có trả lời hay không."""
     r = agent("tìm gia sư Toán lớp 8 ôn thi cho con em")
-    assert len(r["tutors"]) == 0, "bắn card quá sớm khi chưa hiểu đủ nhu cầu bé"
+    assert len(r["tutors"]) == 0, "phải hỏi lượt gộp tuỳ chọn 1 lần trước khi bắn card"
     assert r["reply"] != ""
+    # Agent phải đánh dấu đã hỏi (NestJS persist) để lượt sau không hỏi lại.
+    assert (r.get("context_patch") or {}).get("asked_preferences") is True
 
 
 def test_thieu_thong_tin_hoi_lai(agent):
@@ -20,6 +23,27 @@ def test_thieu_thong_tin_hoi_lai(agent):
     r = agent("em cần tìm gia sư dạy Tiếng Anh")
     assert len(r["tutors"]) == 0
     assert r["reply"] != ""
+
+
+def test_tu_choi_luot_gop_van_recommend(agent):
+    """PH trả lời 'sao cũng được' cho lượt gộp tuỳ chọn -> VẪN search, không hỏi lại lần 2."""
+    history = [
+        {"role": "user", "content": "tìm gia sư Toán lớp 8 ôn thi cho con em"},
+        {"role": "assistant", "content": "Dạ anh/chị muốn bé học online hay gia sư đến nhà ạ? "
+         "Có mong muốn gì thêm về gia sư không? Không có thì em tìm luôn ạ!"},
+    ]
+    r = agent("sao cũng được em ơi", history=history,
+              context={"subject_id": 1, "grade_level_id": 56, "goal": "ôn thi"})
+    assert len(r["tutors"]) > 0, "PH đã từ chối lượt gộp mà vẫn không search (hỏi lặp?)"
+
+
+def test_da_hoi_luot_gop_khong_hoi_lai(agent):
+    """asked_preferences=True (NestJS persist từ lượt trước) -> đủ 3 slot là search luôn."""
+    r = agent("bé cần củng cố kiến thức",
+              history=[{"role": "user", "content": "tìm gia sư Toán lớp 8"},
+                       {"role": "assistant", "content": "Dạ bé học với mục tiêu gì ạ?"}],
+              context={"subject_id": 1, "grade_level_id": 56, "asked_preferences": True})
+    assert len(r["tutors"]) > 0, "đã hỏi lượt gộp rồi mà vẫn chưa search"
 
 
 def test_du_nhu_cau_thi_recommend(agent):

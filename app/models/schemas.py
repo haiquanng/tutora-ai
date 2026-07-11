@@ -12,10 +12,12 @@ class TutorChatContext(BaseModel):
     city: Optional[str] = None
     # Slot hội thoại (agent slot-filling) — NestJS persist qua context_patch giống grade.
     # goal: mục tiêu học (mất gốc/củng cố/nâng cao/ôn thi/luyện SAT...). preferences: mong
-    # muốn về gia sư (tính cách, cách dạy, hình thức). searched: đã search & ra card lần nào
-    # chưa (để agent biết đang ở giai đoạn tư vấn hay đã gợi ý → không hỏi lại vòng vo).
+    # muốn về gia sư (tính cách, cách dạy, hình thức). asked_preferences: đã hỏi lượt gộp
+    # tuỳ chọn (khu vực/hình thức + mong muốn) chưa — gate "hỏi 1 lần, mềm" của KB-A bước 4:
+    # hỏi đúng 1 lần rồi search dù PH có trả lời hay không (agents/agentscenarios.md).
     goal: Optional[str] = None
     preferences: Optional[str] = None
+    asked_preferences: Optional[bool] = None
 
 
 # ── Session memory: tóm tắt history cũ khi user quay lại sau gap dài ──
@@ -87,6 +89,8 @@ class AgentContextPatch(BaseModel):
     # Slot hội thoại mới rút được trong lượt này → NestJS lưu, gửi lại lượt sau.
     goal: Optional[str] = None
     preferences: Optional[str] = None
+    # True khi agent VỪA hỏi lượt gộp tuỳ chọn — NestJS persist để lượt sau không hỏi lại.
+    asked_preferences: Optional[bool] = None
 
 class AgentResponse(BaseModel):
     reply: str

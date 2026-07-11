@@ -251,15 +251,21 @@ nên dừng.)_
 #### Đối chiếu với code/test hiện tại (để dev đồng bộ)
 
 - `app/services/agent.py::_handle_find_tutor` đã đúng gate 3 slot (subject/grade/goal),
-  KHÔNG chặn theo `preferences` — khớp quyết định chốt ở trên. Còn THIẾU: lượt hỏi gộp
-  area/gender (bước 4 mới) chưa có trong code.
-- **Trích slot tuỳ chọn chủ động (⚠️ mới thêm) chưa có trong code**: `_run_search`
-  (`agent.py`) hiện chỉ truyền `subject_id` vào `TutorChatFilters`, KHÔNG thu thập/trích
-  `tutor_gender`/`area`/`preferences` dù PH có nêu ngay từ câu đầu — nặng hơn cả việc thiếu
-  "lượt hỏi gộp" ở trên, vì kể cả khi PH tự nguyện cung cấp, hệ thống cũng không dùng được.
-  Cần fix đồng thời với gap `tutor_gender` không truyền sang .NET (xem bên dưới).
-- **`_MAX_CARDS_SHOWN = 2` phải đổi thành 3** (user flow chốt top 3 theo 3 tier) — đổi ĐỒNG
-  THỜI với `MAX_CARDS` bên NestJS (agent.handler) và UI card Zalo, không đổi lẻ 1 bên.
+  KHÔNG chặn theo `preferences` — khớp quyết định chốt ở trên.
+- ✅ **Lượt hỏi gộp tuỳ chọn (bước 4) ĐÃ CÓ trong code** (gate "hỏi 1 lần, mềm"): đủ 3 slot
+  + chưa có preferences + chưa hỏi lần nào → hỏi gộp 1 câu, đánh dấu `asked_preferences`
+  qua `context_patch`; lượt sau search dù PH trả lời gì ("sao cũng được" → search luôn).
+  PH giục (rush) → bỏ qua cả câu hỏi goal lẫn lượt gộp, search ngay.
+  ⚠️ **NestJS PHẢI persist field mới `asked_preferences`** (schemas: `TutorChatContext` +
+  `AgentContextPatch`) giống `goal` — chưa persist thì fallback vẫn chạy được nhờ extract
+  bắt câu từ chối, nhưng có nguy cơ hỏi lặp khi PH im lặng/lạc đề.
+- **Trích slot tuỳ chọn chủ động — MỚI CÓ MỘT NỬA**: `preferences` đã được trích & tích lũy
+  từ mọi lượt, nhưng `_run_search` (`agent.py`) vẫn chỉ truyền `subject_id` vào
+  `TutorChatFilters` — `tutor_gender`/`min_rate`/`max_rate` chưa được trích riêng thành
+  filter cứng (mới nằm trong text query). Cần fix đồng thời với gap `tutor_gender` không
+  truyền sang .NET (xem bên dưới).
+- ✅ **`_MAX_CARDS_SHOWN` đã đổi thành 3** phía Python — ⚠️ còn phải đổi ĐỒNG THỜI
+  `MAX_CARDS` bên NestJS (agent.handler) và UI card Zalo, không đổi lẻ 1 bên.
 - **Tier Standard/Pro/Premium chưa tồn tại** ở mọi tầng: Ranking Core (.NET) trả list phẳng.
   Cần thêm: (a) logic gắn tier deterministic (BE hoặc code agent, từ field giá/rating/giờ dạy
   có sẵn trong response), (b) NestJS render nhãn tier lên card, (c) NestJS track card nào
@@ -268,15 +274,15 @@ nên dừng.)_
   KHÔNG truyền sang .NET** (payload thiếu field gender) → slot `tutor_gender` thu được cũng
   vô dụng cho tới khi vá API gap này (cả FastAPI lẫn .NET /recommend).
 - **API waitlist chưa có** (KB-A-1) — BE cần xây trước khi bot được phép hứa "em báo khi có".
-- `tests/agent/test_search_flow.py` có docstring/test (`test_moi_co_mon_lop_thi_hoi_them_khong_ban_card`)
-  kỳ vọng phải có thêm "tình trạng bé + mong muốn gia sư" mới được recommend — **lệch với
-  quyết định chốt ở mục KB-A này**. Cần cập nhật lại test đó cho khớp (chỉ bắt buộc 3 slot),
-  hoặc nếu team thấy hướng "tư vấn sâu hơn rồi mới recommend" mới là đúng sản phẩm thì phải
-  sửa ngược lại code + mục 0 (bảng SLOT) + KB-A ở đây. Không được để 2 nguồn lệch nhau.
+- ✅ Xung đột triết lý với `tests/agent/test_search_flow.py` ĐÃ GIẢI QUYẾT bằng gate
+  "hỏi 1 lần, mềm" (đúng KB-A bước 4): đủ 3 slot cứng → hỏi gộp tuỳ chọn đúng 1 lượt →
+  search dù PH có trả lời hay không. Test cũ giữ nguyên assertion (giờ pass tự nhiên),
+  docstring đã cập nhật + thêm test cho nhánh từ chối lượt gộp và nhánh đã-hỏi-rồi.
 - Vòng refine KB-A-2 (hỏi lý do + giữ tier) hoàn toàn CHƯA có trong code — hiện PH chê thì
   extract rơi vào `find_tutor` và search lại y hệt tiêu chí cũ (trả đúng người cũ).
-- Bug KB-B (xem mục dưới) chưa fix trong code — không thuộc phạm vi matching (KB-A) nhưng
-  nằm ngay sau state SUGGESTED nên dev cần biết khi đụng tới luồng này.
+- ✅ Bug KB-B đã fix trong code: tên không khớp + nhiều gia sư đã gợi ý → HỎI LẠI
+  (`_handle_tutor_query`); chỉ auto-chọn khi đúng 1 người. Tin nhắn chứa id kỹ thuật
+  (tutor-xxx/uuid) cũng đã chặn ở tầng code TRƯỚC khi gọi LLM → đáp như chitchat.
 
 ---
 
@@ -287,7 +293,7 @@ nên dừng.)_
 **Xác định gia sư nào (chỉ theo TÊN, KHÔNG theo id):**
 1. User nhắc TÊN → khớp tên trong danh sách đã gợi ý (`shown_tutors`).
 2. Không rõ + chỉ có 1 gia sư đã gợi ý → lấy người đó.
-3. Không rõ + nhiều người → **HỎI LẠI** "anh/chị muốn xem gia sư nào ạ?" _(KHÔNG lấy đại người đầu — đây là bug hiện tại)_
+3. Không rõ + nhiều người → **HỎI LẠI** "anh/chị muốn xem gia sư nào ạ?" _(KHÔNG lấy đại người đầu — bug này ĐÃ FIX trong `_handle_tutor_query`)_
 
 **Function:** `GET /api/tutors/{id}/full-profile` (chi tiết) hoặc `/schedule` (lịch). `id` lấy
 NỘI BỘ từ tên đã khớp ở `shown_tutors` — user KHÔNG bao giờ cung cấp id.

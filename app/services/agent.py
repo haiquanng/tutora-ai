@@ -138,7 +138,8 @@ def _extract_config(subjects_hint: str, slots: dict, shown_hint: str) -> types.G
         '"grade": <số lớp 1-12 nếu nêu/đổi; null nếu không nhắc>, '
         '"goal": <mục tiêu học 1 cụm ngắn nếu nêu, vd "mất gốc","củng cố","nâng cao","ôn thi chuyển cấp","luyện SAT phần Toán"; null nếu không nhắc>, '
         '"preferences": <mong muốn về gia sư 1 cụm ngắn nếu nêu, vd "kiên nhẫn","nghiêm khắc","học online"; null nếu không nhắc>, '
-        '"tutor_ref": <TÊN gia sư phụ huynh đang hỏi tới nếu có, lấy từ danh sách đã gợi ý; null nếu không>}\n\n'
+        '"tutor_ref": <TÊN gia sư phụ huynh đang hỏi tới nếu có, lấy từ danh sách đã gợi ý; null nếu không>, '
+        '"rush": <true nếu phụ huynh GIỤC xem gia sư ngay ("đưa tôi gia sư","có ai không","xem luôn đi","nhanh lên"); false nếu bình thường>}\n\n'
         "QUY TẮC QUAN TRỌNG:\n"
         "- Ưu tiên đọc TIN NHẮN MỚI NHẤT của phụ huynh. Nếu tin nhắn mới có nêu môn/lớp/mục "
         "tiêu/mong muốn thì PHẢI điền field tương ứng, KỂ CẢ khi nhiều thứ nằm chung 1 câu.\n"
@@ -163,7 +164,12 @@ def _extract_config(subjects_hint: str, slots: dict, shown_hint: str) -> types.G
         "grade=null (giữ nguyên môn/lớp cũ, KHÔNG đổi).\n"
         "- Câu ngắn xác nhận ('ok','được','có','đúng rồi') sau khi trợ lý hỏi chuyện KHÁC (không "
         "phải đổi môn/lớp) → intent='chitchat'.\n"
-        "- Phụ huynh giục xem gia sư ('đưa tôi gia sư','có ai không','xem gia sư') → intent='find_tutor'.\n"
+        "- Phụ huynh giục xem gia sư ('đưa tôi gia sư','có ai không','xem gia sư') → intent='find_tutor' và rush=true.\n"
+        "- Nếu tin nhắn TRƯỚC của trợ lý hỏi về mong muốn thêm/khu vực/hình thức học mà phụ "
+        "huynh trả lời KHÔNG có yêu cầu ('sao cũng được','không có gì','gì cũng được','tùy em', "
+        "kể cả 'ừ','ok','được' ngay sau câu hỏi đó — quy tắc này ƯU TIÊN hơn quy tắc câu ngắn "
+        "xác nhận ở trên) → intent='find_tutor', preferences='không có yêu cầu đặc biệt' (để hệ "
+        "thống biết đã hỏi xong, tìm luôn).\n"
         "Môn Tutora có: " + subjects_hint + "."
     )
     return types.GenerateContentConfig(
@@ -184,7 +190,9 @@ async def _extract_turn(history_contents: list, message: str, slots: dict,
     except Exception as e:
         print(f"agent _extract_turn error: {e}")
         # Không hiểu được → coi như muốn tìm gia sư, để luồng hỏi tiếp (an toàn).
-        return {"intent": "find_tutor"}
+        # Trả ĐỦ key (code sau truy cập ex["subject"]... trực tiếp — thiếu key là KeyError).
+        return {"intent": "find_tutor", "subject": None, "grade": None, "goal": None,
+                "preferences": None, "tutor_ref": None, "rush": False}
     intent = data.get("intent")
     if intent not in _INTENT_VALUES:
         intent = "find_tutor"
@@ -195,6 +203,7 @@ async def _extract_turn(history_contents: list, message: str, slots: dict,
         "goal": (data.get("goal") or None),
         "preferences": (data.get("preferences") or None),
         "tutor_ref": (data.get("tutor_ref") or None),
+        "rush": bool(data.get("rush")),
     }
 
 
@@ -394,14 +403,20 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
         ctx.goal = ex["goal"]
         patch_out["goal"] = ex["goal"]
     if ex["preferences"]:
-        # Tích lũy mong muốn (nối, không đè) để không mất ý cũ — nhưng tránh nối trùng
-        # (extract đôi khi lặp lại preference cũ từ history).
         new_pref = ex["preferences"].strip()
-        old = ctx.preferences or ""
-        if new_pref.lower() not in old.lower():
-            merged = " ; ".join(x for x in [old, new_pref] if x)
-            ctx.preferences = merged
-            patch_out["preferences"] = merged
+        if "không có yêu cầu" in new_pref.lower():
+            # PH từ chối lượt gộp tuỳ chọn ("sao cũng được") → đánh dấu ĐÃ HỎI XONG để gate
+            # dưới search luôn. KHÔNG lưu làm preference thật (tránh nhiễu query search).
+            ctx.asked_preferences = True
+            patch_out["asked_preferences"] = True
+        else:
+            # Tích lũy mong muốn (nối, không đè) để không mất ý cũ — nhưng tránh nối trùng
+            # (extract đôi khi lặp lại preference cũ từ history).
+            old = ctx.preferences or ""
+            if new_pref.lower() not in old.lower():
+                merged = " ; ".join(x for x in [old, new_pref] if x)
+                ctx.preferences = merged
+                patch_out["preferences"] = merged
 
     intent = ex["intent"]
 
@@ -450,12 +465,16 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
 
     # ── find_tutor: gate slot deterministic ──
     return await _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
-                                    body.message, history_contents, allowed, _patch, patch_out)
+                                    body.message, history_contents, allowed, _patch, patch_out,
+                                    rush=ex["rush"])
 
 
 async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
-                             message, history_contents, allowed, patch_fn, patch_out) -> AgentResponse:
-    """Gate slot (subject+grade+goal) rồi search THẬT. Thiếu slot → hỏi đúng cái thiếu."""
+                             message, history_contents, allowed, patch_fn, patch_out,
+                             rush: bool = False) -> AgentResponse:
+    """Gate slot (subject+grade+goal) rồi search THẬT. Thiếu slot → hỏi đúng cái thiếu.
+    rush=True (PH giục) → bỏ qua câu hỏi mềm (goal, lượt gộp tuỳ chọn), search ngay với slot
+    hiện có — tôn trọng sự sốt ruột hơn thu đủ dữ liệu (KB-A). subject/grade vẫn bắt buộc."""
     # Thiếu môn → hỏi môn (kèm gợi ý map nếu là mục tiêu SAT/IELTS chưa rõ môn).
     if ctx.subject_id is None:
         # Nếu ĐÃ biết mục tiêu (vd 'luyện thi SAT') mà chưa rõ môn → gợi ý map mục tiêu về
@@ -484,7 +503,8 @@ async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
         return AgentResponse(reply=r or "Dạ bé nhà mình đang học lớp mấy ạ?", context_patch=patch_fn())
 
     # Thiếu mục tiêu → hỏi mục tiêu (1 câu, để tư vấn trúng thay vì bắn top-rating).
-    if not ctx.goal:
+    # PH giục (rush) → bỏ qua, search luôn với slot hiện có (goal là câu hỏi mềm).
+    if not ctx.goal and not rush:
         r = await _say(
             f"Đã biết cần gia sư {cur_subject_name or ''} lớp {cur_grade or ''}. Hỏi 1 câu ngắn "
             "về MỤC TIÊU học của bé để tư vấn trúng: bé cần mất gốc/củng cố lại, nâng cao, hay "
@@ -492,6 +512,24 @@ async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
             history_contents)
         return AgentResponse(reply=r or "Dạ bé nhà mình học với mục tiêu gì ạ (củng cố, nâng cao "
                              "hay ôn thi)?", context_patch=patch_fn())
+
+    # ── Lượt gộp tuỳ chọn "hỏi 1 lần, mềm" (KB-A bước 4 — agents/agentscenarios.md) ──
+    # Đủ 3 slot bắt buộc nhưng chưa biết mong muốn thêm VÀ chưa từng hỏi → hỏi GỘP đúng 1 câu
+    # (hình thức học/khu vực + mong muốn về gia sư). Đánh dấu asked_preferences qua patch để
+    # lượt sau KHÔNG hỏi lại — PH trả lời gì (kể cả 'sao cũng được') lượt sau cũng search.
+    # PH giục (rush) → bỏ qua luôn.
+    if not rush and not ctx.preferences and not ctx.asked_preferences:
+        patch_out["asked_preferences"] = True
+        r = await _say(
+            f"Đã đủ thông tin chính (gia sư {cur_subject_name or ''} lớp {cur_grade or ''}, mục "
+            f"tiêu {ctx.goal}). Trước khi tìm, hỏi GỘP trong 1 câu duy nhất: anh/chị muốn bé học "
+            "online hay gia sư đến nhà, và có mong muốn gì thêm về gia sư không (cô hay thầy, "
+            "kiên nhẫn, nghiêm khắc...). Chốt câu bằng ý: không có thì em tìm luôn ạ. KHÔNG hỏi "
+            "lại môn/lớp/mục tiêu.", history_contents)
+        return AgentResponse(
+            reply=r or "Dạ anh/chị muốn bé học online hay gia sư đến nhà ạ? Anh/chị có mong muốn "
+            "gì thêm về gia sư không (cô hay thầy, kiên nhẫn...)? Không có thì em tìm luôn ạ!",
+            context_patch=patch_fn())
 
     # ── Đủ slot → SEARCH THẬT ──
     query = ", ".join(x for x in [
@@ -518,7 +556,8 @@ async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
         "Đã tìm được gia sư phù hợp. Giới thiệu NGẮN GỌN cho phụ huynh đúng những gia sư trong "
         f"danh sách sau (chỉ dùng đúng các tên này, KHÔNG thêm ai khác, KHÔNG bịa): {names_json}. "
         "Mỗi người 1 dòng: tên + 1 lý do ngắn hợp với nhu cầu "
-        f"({ctx.goal}{'; ' + ctx.preferences if ctx.preferences else ''}). KHÔNG nói tổng số tìm "
+        f"({ctx.goal or 'học ' + (cur_subject_name or 'môn đã chọn')}"
+        f"{'; ' + ctx.preferences if ctx.preferences else ''}). KHÔNG nói tổng số tìm "
         "được, KHÔNG liệt kê lại giá/đánh giá (đã có thẻ riêng bên dưới). Mời anh/chị xem thẻ chi tiết.",
         history_contents)
     return AgentResponse(
