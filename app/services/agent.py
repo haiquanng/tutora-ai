@@ -296,7 +296,8 @@ async def _run_search(ctx, query: str) -> tuple[list, list]:
     summary = [
         {"name": t.get("fullName") or t.get("name"),
          "rating": t.get("averageRating"),
-         "rate": t.get("hourlyRate") or t.get("priceMin")}
+         # .NET TutorRecommendItem trả pricePerHour (không phải hourlyRate/priceMin).
+         "rate": t.get("pricePerHour") or t.get("hourlyRate") or t.get("priceMin")}
         for t in shown
     ]
     return tutors, summary
