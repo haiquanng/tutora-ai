@@ -41,7 +41,8 @@ _settings = get_settings()
 # Luồng sale đáng tiền — bớt bịa/hỏi lại hơn nhiều so với flash-lite.
 _MODEL = "gemini-2.5-flash"
 # PHẢI khớp MAX_CARDS bên NestJS (agent.handler) — số card gia sư thực render trên Zalo.
-_MAX_CARDS_SHOWN = 2
+# 3 = top 3 chia 3 tier Standard/Pro/Premium theo user flow chính thức (agents/agentscenarios.md KB-A).
+_MAX_CARDS_SHOWN = 3
 
 # Retry lỗi TẠM THỜI của Gemini (503 quá tải / 429 / timeout). Backoff tăng dần.
 _RETRY_DELAYS = [0.8, 2.0]
@@ -73,6 +74,15 @@ _ID_LEAK_PAREN_RE = re.compile(r"\s*[\(\[]\s*id\s*[:=]?\s*[\w-]+\s*[\)\]]", re.I
 _ID_LEAK_BARE_RE = re.compile(r"\bid\s*[:=]?\s*[\w-]{3,}\s*", re.IGNORECASE)
 _ID_TOKEN_RE = re.compile(
     r"[\"'“”]?\b(?:seed-[\w-]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b[\"'“”]?",
+    re.IGNORECASE,
+)
+
+# ── Phát hiện id kỹ thuật TRONG TIN NHẮN USER (khác _ID_TOKEN_RE ở trên — cái đó lọc OUTPUT) ──
+# User thường không thấy/không biết id thật (tutor-xxx, uuid) → gõ id là dev test hoặc trêu,
+# KHÔNG phải nhu cầu thật. Xem agents/agentscenarios.md mục KB-B/KB-F.
+_TECH_ID_INPUT_RE = re.compile(
+    r"\b(?:tutor|seed)[-_][\w-]+\b"
+    r"|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
     re.IGNORECASE,
 )
 
@@ -302,6 +312,18 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
                       parts=[types.Part.from_text(text=m.content)])
         for m in body.history
     ]
+
+    # ── Chặn id kỹ thuật ở tầng CODE (dev test / user trêu, KHÔNG phải nhu cầu thật) ──
+    # Bắt TRƯỚC khi gọi LLM trích slot: không tốn lượt gọi, không để LLM "hiểu nhầm" thành
+    # tutor_detail rồi lộ hành vi lấy nhầm gia sư. Xem agents/agentscenarios.md KB-B/KB-F.
+    if _TECH_ID_INPUT_RE.search(body.message):
+        r = await _say(
+            "Phụ huynh gõ một mã/id kỹ thuật (không phải nhu cầu thật — nhiều khả năng là dev "
+            "đang test hoặc trêu, vì phụ huynh thật không biết/không thấy id này). KHÔNG xác nhận "
+            "hay tra cứu theo id đó. Đáp gọn, lịch sự, mời anh/chị cho biết TÊN gia sư hoặc nhu "
+            "cầu tìm gia sư để được hỗ trợ.", history_contents)
+        return AgentResponse(
+            reply=r or "Dạ anh/chị cho em biết tên gia sư hoặc nhu cầu để em hỗ trợ ạ.")
 
     subjects = await _get_subjects()
     subjects_hint = ", ".join(s.get("subjectName", "") for s in subjects)
@@ -539,7 +561,7 @@ async def _handle_tutor_query(intent: str, tutor_ref: str | None, allowed: dict,
         return AgentResponse(reply=r or "Dạ để em tìm gia sư phù hợp trước, anh/chị cho em biết "
                              "cần môn gì, bé lớp mấy ạ?", context_patch=patch)
 
-    # Khớp tên phụ huynh nhắc → tutor_id. Không rõ → lấy người đầu danh sách đã shown.
+    # Khớp tên phụ huynh nhắc → tutor_id.
     tid = None
     if tutor_ref:
         ref = tutor_ref.strip().lower()
@@ -548,7 +570,17 @@ async def _handle_tutor_query(intent: str, tutor_ref: str | None, allowed: dict,
                 tid = i
                 break
     if tid is None:
-        tid = next(iter(allowed))
+        if len(allowed) == 1:
+            # Chỉ có đúng 1 gia sư đã gợi ý → chắc chắn PH đang hỏi người đó.
+            tid = next(iter(allowed))
+        else:
+            # Nhiều gia sư đã gợi ý mà tên không khớp ai → HỎI LẠI, KHÔNG đoán đại người đầu
+            # (bug cũ: trả nhầm sang gia sư khác). Xem agents/agentscenarios.md KB-B.
+            r = await _say(
+                "Phụ huynh hỏi chi tiết/lịch một gia sư nhưng chưa rõ đang hỏi ai trong số các "
+                "gia sư đã gợi ý. Hỏi lại lịch sự, ngắn gọn: anh/chị muốn xem gia sư nào ạ.",
+                history_contents)
+            return AgentResponse(reply=r or "Dạ anh/chị muốn xem gia sư nào ạ?", context_patch=patch)
 
     if intent == "tutor_detail":
         data = await _dotnet_get(f"/api/tutors/{tid}/full-profile")
