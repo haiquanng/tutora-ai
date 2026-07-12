@@ -127,7 +127,7 @@ _INTENT_VALUES = [
 ]
 
 
-def _extract_config(subjects_hint: str, slots: dict, shown_hint: str) -> types.GenerateContentConfig:
+def _extract_config(subjects_hint: str, slots: dict, shown_hint: str, message: str = "") -> types.GenerateContentConfig:
     known = json.dumps({k: v for k, v in slots.items() if v}, ensure_ascii=False)
     instruction = (
         "Bạn là bộ TRÍCH THÔNG TIN cho trợ lý tìm gia sư Tutora. Đọc lịch sử hội thoại + tin "
@@ -139,7 +139,12 @@ def _extract_config(subjects_hint: str, slots: dict, shown_hint: str) -> types.G
         '"goal": <mục tiêu học 1 cụm ngắn nếu nêu, vd "mất gốc","củng cố","nâng cao","ôn thi chuyển cấp","luyện SAT phần Toán"; null nếu không nhắc>, '
         '"preferences": <mong muốn về gia sư 1 cụm ngắn nếu nêu, vd "kiên nhẫn","nghiêm khắc","học online"; null nếu không nhắc>, '
         '"tutor_ref": <TÊN gia sư phụ huynh đang hỏi tới nếu có, lấy từ danh sách đã gợi ý; null nếu không>, '
-        '"rush": <true nếu phụ huynh GIỤC xem gia sư ngay ("đưa tôi gia sư","có ai không","xem luôn đi","nhanh lên"); false nếu bình thường>}\n\n'
+        '"rush": <true nếu phụ huynh GIỤC xem gia sư ngay ("đưa tôi gia sư","có ai không","xem luôn đi","nhanh lên"); false nếu bình thường>, '
+        '"knowledge_note": <nếu tin nhắn có câu HỎI kiến thức giáo dục đại chúng (nội dung/cấu trúc 1 kỳ '
+        'thi, kỹ năng cần học, vd "GMAT thi gồm phần Toán tư duy và Tiếng Anh (Verbal)") → 1 câu trả lời '
+        'NGẮN GỌN, giọng THAM KHẢO không tuyệt đối ("thường gồm...", "phổ biến là..."); TUYỆT ĐỐI KHÔNG '
+        'trả lời về chính sách/giá/hoàn tiền/quy trình CỦA TUTORA (thuộc FAQ RAG riêng, không phải đây); '
+        'null nếu tin nhắn không hỏi kiến thức gì>}\n\n'
         "QUY TẮC QUAN TRỌNG:\n"
         "- Ưu tiên đọc TIN NHẮN MỚI NHẤT của phụ huynh. Nếu tin nhắn mới có nêu môn/lớp/mục "
         "tiêu/mong muốn thì PHẢI điền field tương ứng, KỂ CẢ khi nhiều thứ nằm chung 1 câu.\n"
@@ -149,10 +154,42 @@ def _extract_config(subjects_hint: str, slots: dict, shown_hint: str) -> types.G
         "- CHỈ điền field khi phụ huynh THỰC SỰ nêu. KHÔNG bịa, KHÔNG suy diễn. Không nhắc = null.\n"
         "- Đã biết sẵn từ các lượt trước (nếu tin nhắn mới KHÔNG nhắc lại và KHÔNG đổi thì để "
         "null, hệ thống tự giữ giá trị cũ — đừng chép lại): " + known + ".\n"
-        "- MỤC TIÊU HIỂU RỘNG: 'luyện thi SAT/IELTS/TOEIC', 'thi HSG', 'ôn thi chuyển cấp', "
-        "'thi vào 10', 'thi THPTQG' đều là GOAL (mục tiêu), KHÔNG phải môn học. Vd 'luyện thi "
-        "SAT' → goal='luyện thi SAT' (KHÔNG phải subject). Nếu SAT/IELTS mà chưa rõ môn thì để "
-        "subject=null (bước sau sẽ hỏi).\n"
+        "- MỤC TIÊU HIỂU RỘNG (KHÔNG giới hạn trong 1 danh sách cố định): BẤT KỲ tên kỳ thi/chứng "
+        "chỉ/chương trình nào phụ huynh nhắc tới (SAT, IELTS, TOEIC, GMAT, HSG, đánh giá năng "
+        "lực, chuyển cấp, thi vào 10, THPTQG, hay bất kỳ kỳ thi/chứng chỉ nào khác kể cả cái bạn "
+        "chưa từng nghe tên) đều là GOAL (mục tiêu), KHÔNG phải môn học — dù bạn không chắc kỳ "
+        "thi đó gồm phần gì, vẫn điền goal đúng tên PH nhắc, subject=null nếu PH chưa nói rõ môn "
+        "(bước sau sẽ hỏi/gợi ý theo goal).\n"
+        "- QUAN TRỌNG — CÂU HỎI về giáo dục (kỳ thi, chứng chỉ, phương pháp học, lộ trình học...) "
+        "vẫn là intent='find_tutor', KHÔNG phải 'faq': phụ huynh hỏi dạng thông tin ('luyện SAT "
+        "cần học môn gì', 'IELTS thi những kỹ năng nào', 'học Toán tư duy có khác Toán thường "
+        "không', 'phương pháp Montessori là gì'...) thực chất là bước ĐẦU của nhu cầu tìm gia sư "
+        "— Tutora tư vấn giáo dục qua việc tìm đúng gia sư, KHÔNG tách riêng thành FAQ. → "
+        "intent='find_tutor', điền goal nếu câu hỏi gắn với 1 mục tiêu/kỳ thi cụ thể. CHỈ dùng "
+        "intent='faq' cho câu hỏi về CHÍNH SÁCH/CÁCH HOẠT ĐỘNG của Tutora (hoàn tiền, học phí "
+        "chung, cách đăng ký, quy trình...) — KHÔNG dùng faq cho bất kỳ câu hỏi kiến thức giáo "
+        "dục/kỳ thi/phương pháp học nào.\n"
+        "- knowledge_note ĐI KÈM trường hợp trên, PHẠM VI RỘNG: bất kỳ câu hỏi kiến thức giáo dục "
+        "đại chúng nào — nội dung/cấu trúc kỳ thi ('GMAT thi gồm phần gì'), phương pháp học "
+        "('học Toán tư duy khác gì Toán thường', 'phương pháp Phonics là gì'), lộ trình/độ tuổi "
+        "phù hợp, hay kiến thức giáo dục phổ thông khác PH hỏi → điền knowledge_note = câu trả "
+        "lời NGẮN GỌN, kiến thức phổ thông, giọng tham khảo không tuyệt đối (KHÔNG phải cam kết "
+        "của Tutora). Nếu bạn KHÔNG đủ tự tin trả lời chính xác (kỳ thi/khái niệm quá lạ/mới) → "
+        "vẫn điền 1 câu ngắn thừa nhận nhẹ nhàng KHÔNG chắc chắn tuyệt đối (vd 'phần này em chưa "
+        "nắm rõ chi tiết') thay vì bịa chắc nịch — tuyệt đối không bỏ trống rồi im lặng bỏ qua "
+        "câu hỏi. Mục đích: bot LUÔN trả lời đúng trọng tâm câu hỏi trước, rồi mới dẫn tự nhiên "
+        "sang tìm gia sư trong CÙNG 1 tin nhắn — không được bỏ qua phần trả lời kiến thức.\n"
+        "- ⚠️⚠️ NEO knowledge_note + goal VÀO ĐÚNG TIN NHẮN MỚI NHẤT — LỖI THẬT HAY GẶP NHẤT: "
+        "trong hội thoại test nhanh nhiều chủ đề liên tiếp (PH hỏi SAT, rồi hỏi đánh giá năng "
+        "lực, rồi hỏi TOEIC vs IELTS...), bot ĐÃ TỪNG trả lời SAI — tin nhắn mới hỏi 'TOEIC khác "
+        "gì IELTS' nhưng bot trả lời về SAT (chủ đề của 2-3 lượt TRƯỚC, không phải lượt này). "
+        "TUYỆT ĐỐI không được lặp lại lỗi này.\n"
+        "  QUY TRÌNH BẮT BUỘC trước khi điền knowledge_note/goal: (1) CHỈ đọc phần TEXT của tin "
+        "nhắn mới nhất (bỏ qua toàn bộ lịch sử ở bước này), xác định CHÍNH XÁC chủ đề/kỳ thi/mục "
+        "tiêu được nhắc trong CÂU CHỮ đó — không suy diễn, không lấy từ lượt trước. (2) knowledge_"
+        "note phải trả lời ĐÚNG chủ đề vừa xác định ở bước (1), dù lịch sử trước đó đang nói chủ "
+        "đề khác hẳn. (3) Nếu tin nhắn mới nhắc tên kỳ thi/mục tiêu KHÁC với goal đã biết trước "
+        "đó → goal PHẢI cập nhật theo tên MỚI (không giữ goal cũ).\n"
         "- intent='tutor_detail'/'availability'/'booking' chỉ khi có gia sư đã gợi ý trước đó. "
         "Danh sách gia sư đã gợi ý: " + (shown_hint or "chưa có") + ".\n"
         "- XÁC NHẬN ĐỔI MÔN/LỚP (quan trọng): nếu tin nhắn TRƯỚC của trợ lý là câu hỏi xác "
@@ -170,7 +207,10 @@ def _extract_config(subjects_hint: str, slots: dict, shown_hint: str) -> types.G
         "kể cả 'ừ','ok','được' ngay sau câu hỏi đó — quy tắc này ƯU TIÊN hơn quy tắc câu ngắn "
         "xác nhận ở trên) → intent='find_tutor', preferences='không có yêu cầu đặc biệt' (để hệ "
         "thống biết đã hỏi xong, tìm luôn).\n"
-        "Môn Tutora có: " + subjects_hint + "."
+        "Môn Tutora có: " + subjects_hint + ".\n\n"
+        "═══ TIN NHẮN MỚI NHẤT CỦA PHỤ HUYNH — XỬ LÝ intent/goal/knowledge_note DỰA DUY NHẤT "
+        "VÀO ĐÚNG CÂU NÀY, KHÔNG lấy chủ đề từ các lượt cũ hơn trong lịch sử ═══\n"
+        '"' + message + '"'
     )
     return types.GenerateContentConfig(
         system_instruction=instruction,
@@ -181,18 +221,18 @@ def _extract_config(subjects_hint: str, slots: dict, shown_hint: str) -> types.G
 
 async def _extract_turn(history_contents: list, message: str, slots: dict,
                         subjects_hint: str, shown_hint: str) -> dict:
-    """Trả {intent, subject, grade, goal, preferences, tutor_ref}. Fallback an toàn nếu lỗi."""
+    """Trả {intent, subject, grade, goal, preferences, tutor_ref}. Fallback an toàn nếu lỗi.
+    history_contents ĐÃ chứa tin nhắn hiện tại ở cuối (run_agent append) — không append lại."""
     contents = list(history_contents)
-    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=message)]))
     try:
-        resp = await _generate(contents, _extract_config(subjects_hint, slots, shown_hint))
+        resp = await _generate(contents, _extract_config(subjects_hint, slots, shown_hint, message))
         data = json.loads((resp.text or "{}").strip())
     except Exception as e:
         print(f"agent _extract_turn error: {e}")
         # Không hiểu được → coi như muốn tìm gia sư, để luồng hỏi tiếp (an toàn).
         # Trả ĐỦ key (code sau truy cập ex["subject"]... trực tiếp — thiếu key là KeyError).
         return {"intent": "find_tutor", "subject": None, "grade": None, "goal": None,
-                "preferences": None, "tutor_ref": None, "rush": False}
+                "preferences": None, "tutor_ref": None, "rush": False, "knowledge_note": None}
     intent = data.get("intent")
     if intent not in _INTENT_VALUES:
         intent = "find_tutor"
@@ -204,16 +244,39 @@ async def _extract_turn(history_contents: list, message: str, slots: dict,
         "preferences": (data.get("preferences") or None),
         "tutor_ref": (data.get("tutor_ref") or None),
         "rush": bool(data.get("rush")),
+        "knowledge_note": (data.get("knowledge_note") or None),
     }
 
 
 # ───────────────────────── DIỄN ĐẠT (LLM sinh câu chữ 1 lượt) ─────────────────────────
 async def _say(task: str, history_contents: list | None = None) -> str:
     """LLM sinh 1 câu tiếng Việt theo yêu cầu 'task'. Dùng cho hỏi thêm / giới thiệu / báo lỗi.
-    task đã chứa đủ dữ kiện; LLM chỉ diễn đạt, không tự bịa thêm thông tin."""
-    config = types.GenerateContentConfig(system_instruction=_STYLE, temperature=0.4)
+    task đã chứa đủ dữ kiện; LLM chỉ diễn đạt, không tự bịa thêm thông tin.
+
+    QUAN TRỌNG (2 bug thật production 2026-07-11, đọc kỹ trước khi sửa):
+    1. task đưa vào system_instruction, KHÔNG append như 1 lượt "user" giả — nếu để trong
+       contents, model hiểu nhầm là tin nhắn thật của phụ huynh và "xác nhận đã hiểu hướng
+       dẫn" thay vì thực hiện (RÒ RỈ PROMPT: bot từng trả lời "Dạ em đã nắm được hướng dẫn
+       này rồi ạ...").
+    2. history_contents PHẢI kết thúc bằng TIN NHẮN HIỆN TẠI của phụ huynh (run_agent đã
+       append). Bản vá bug 1 từng append lượt giả "(tiếp tục)" thay vì tin nhắn thật →
+       Gemini hiểu là "tiếp tục trả lời câu đang dang dở trong history" → trả lời câu hỏi
+       của LƯỢT TRƯỚC, lệch 1 nhịp ở mọi lượt (OFF-BY-ONE), bỏ qua task trong system
+       instruction. Lượt giả bên dưới chỉ còn là fallback cho history rỗng bất thường.
+    """
+    instruction = (
+        _STYLE + "\n\n"
+        "NHIỆM VỤ NỘI BỘ (chỉ dành riêng cho bạn — TUYỆT ĐỐI không nhắc lại, không xác nhận, "
+        "không thừa nhận đang làm theo hướng dẫn dưới bất kỳ hình thức nào; không nói 'em đã "
+        "nắm được', 'em sẽ luôn', 'theo hướng dẫn này'... Chỉ xuất ra ĐÚNG câu trả lời tự nhiên "
+        "như đang trực tiếp nói chuyện với phụ huynh, không đề cập gì đến việc có một nhiệm vụ):"
+        "\n" + task
+    )
+    config = types.GenerateContentConfig(system_instruction=instruction, temperature=0.4)
     contents = list(history_contents or [])
-    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=task)]))
+    if not contents or contents[-1].role != "user":
+        # Gemini cần lượt cuối là "user" để sinh phản hồi mạch lạc — không còn task giả nữa.
+        contents.append(types.Content(role="user", parts=[types.Part.from_text(text="(tiếp tục)")]))
     try:
         resp = await _generate(contents, config)
         return _sanitize_reply((resp.text or "").strip())
@@ -305,7 +368,10 @@ async def _run_search(ctx, query: str) -> tuple[list, list]:
 
 # ───────────────────────── AGENT (điều phối deterministic) ─────────────────────────
 async def run_agent(body: AgentRequest) -> AgentResponse:
+    import time
+    _t0 = time.time()
     ctx = body.context
+    print(f"[DEBUG-IN] t={_t0:.3f} message={body.message!r} ctx.goal={ctx.goal!r}")
 
     # Slot hiện có (từ context NestJS gửi kèm). subject_id/grade_level_id là id thật;
     # goal/preferences là text. subject/grade "đọc được" (tên/số) suy ra khi cần hỏi.
@@ -317,11 +383,19 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
     }
 
     # History → Content list (tái dùng cho cả trích slot lẫn diễn đạt).
+    # ⚠️ PHẢI append TIN NHẮN HIỆN TẠI vào cuối: history NestJS gửi sang KHÔNG chứa nó
+    # (NestJS chỉ lưu sau khi agent trả lời). Bug thật 2026-07-11 (off-by-one, bot trả lời
+    # câu hỏi của LƯỢT TRƯỚC): _say từng nhận history kết thúc bằng câu hỏi cũ + lượt giả
+    # "(tiếp tục)" → Gemini hiểu là "tiếp tục trả lời câu đang dang dở" → trả lời câu CŨ,
+    # bỏ qua nhiệm vụ trong system_instruction. Trích xuất không dính bug vì tự append
+    # message; giờ append chung 1 chỗ ở đây cho MỌI đường (cả _say lẫn _extract_turn).
     history_contents: list[types.Content] = [
         types.Content(role=("user" if m.role == "user" else "model"),
                       parts=[types.Part.from_text(text=m.content)])
         for m in body.history
     ]
+    history_contents.append(
+        types.Content(role="user", parts=[types.Part.from_text(text=body.message)]))
 
     # ── Chặn id kỹ thuật ở tầng CODE (dev test / user trêu, KHÔNG phải nhu cầu thật) ──
     # Bắt TRƯỚC khi gọi LLM trích slot: không tốn lượt gọi, không để LLM "hiểu nhầm" thành
@@ -355,6 +429,9 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
 
     # ── (1) TRÍCH slot + intent ──
     ex = await _extract_turn(history_contents, body.message, slots_readable, subjects_hint, shown_hint)
+    print(f"[DEBUG-EX] t={time.time():.3f} (t0={_t0:.3f}) message={body.message!r} "
+          f"intent={ex.get('intent')!r} tutor_ref={ex.get('tutor_ref')!r} "
+          f"knowledge_note={ex.get('knowledge_note')!r} shown_hint={shown_hint!r}")
 
     patch_out: dict = {}
 
@@ -420,6 +497,9 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
                 patch_out["preferences"] = merged
 
     intent = ex["intent"]
+    print(f"[DEBUG-ROUTE] intent={intent!r} knowledge_note={ex.get('knowledge_note')!r} "
+          f"subject_id={ctx.subject_id!r} grade_level_id={ctx.grade_level_id!r} "
+          f"goal={ctx.goal!r} asked_preferences={ctx.asked_preferences!r}")
 
     # ── (2) ĐIỀU PHỐI theo intent (code quyết, không phải LLM) ──
 
@@ -467,15 +547,27 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
     # ── find_tutor: gate slot deterministic ──
     return await _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
                                     body.message, history_contents, allowed, _patch, patch_out,
-                                    rush=ex["rush"])
+                                    rush=ex["rush"], knowledge_note=ex["knowledge_note"])
 
 
 async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
                              message, history_contents, allowed, patch_fn, patch_out,
-                             rush: bool = False) -> AgentResponse:
+                             rush: bool = False, knowledge_note: str | None = None) -> AgentResponse:
     """Gate slot (subject+grade+goal) rồi search THẬT. Thiếu slot → hỏi đúng cái thiếu.
     rush=True (PH giục) → bỏ qua câu hỏi mềm (goal, lượt gộp tuỳ chọn), search ngay với slot
-    hiện có — tôn trọng sự sốt ruột hơn thu đủ dữ liệu (KB-A). subject/grade vẫn bắt buộc."""
+    hiện có — tôn trọng sự sốt ruột hơn thu đủ dữ liệu (KB-A). subject/grade vẫn bắt buộc.
+    knowledge_note: câu trả lời kiến thức chung đã trích sẵn (nếu PH hỏi thông tin kiểu 'GMAT
+    thi gồm phần gì') — PHẢI đưa vào đầu MỌI phản hồi bên dưới trong CÙNG 1 tin nhắn, không được
+    bỏ qua rồi nhảy thẳng vào hỏi slot/giới thiệu gia sư (bug thật gặp khi test production
+    2026-07-11: PH hỏi kiến thức, bot lờ đi, chỉ bắn thẳng card gia sư)."""
+    note_prefix = ""
+    if knowledge_note:
+        note_prefix = (
+            f"PH vừa hỏi kiến thức chung, đã có sẵn câu trả lời ngắn (kiến thức phổ thông, giọng "
+            f"tham khảo, KHÔNG phải cam kết của Tutora): \"{knowledge_note}\". Đưa câu trả lời "
+            "này vào ĐẦU phản hồi một cách tự nhiên (không nói 'theo kiến thức chung' hay bất kỳ "
+            "cụm meta nào), rồi mới tiếp tục nội dung dưới đây, TRONG CÙNG 1 tin nhắn:\n"
+        )
     # Thiếu môn → hỏi môn (kèm gợi ý map nếu là mục tiêu SAT/IELTS chưa rõ môn).
     if ctx.subject_id is None:
         # Nếu ĐÃ biết mục tiêu (vd 'luyện thi SAT') mà chưa rõ môn → gợi ý map mục tiêu về
@@ -485,10 +577,14 @@ async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
             goal_hint = (
                 f"Phụ huynh đã nêu mục tiêu: '{ctx.goal}'. Đây là MỤC TIÊU, không phải môn — "
                 "Tutora tìm gia sư môn phổ thông để luyện mục tiêu đó (KHÔNG được nói Tutora "
-                "không có chương trình này). Gợi ý cụ thể môn phù hợp rồi hỏi bé muốn học môn "
-                "nào: SAT → phần Toán hoặc tiếng Anh; IELTS/TOEIC → tiếng Anh; thi HSG/chuyển "
-                "cấp/THPTQG → hỏi bé cần môn nào. ")
+                "không có chương trình này). Dựa vào kiến thức chung về mục tiêu/kỳ thi đó, tự "
+                "gợi ý (các) môn phổ thông phù hợp nhất rồi hỏi bé muốn tập trung môn nào (vd "
+                "SAT → Toán hoặc Tiếng Anh; IELTS/TOEIC → Tiếng Anh; thi HSG/chuyển cấp/THPTQG/"
+                "đánh giá năng lực/kỳ thi khác → hỏi thẳng bé cần môn nào, vì đây là ví dụ minh "
+                "hoạ chứ KHÔNG phải danh sách đầy đủ — áp dụng suy luận tương tự cho MỌI mục tiêu "
+                "khác chưa liệt kê ở đây). ")
         r = await _say(
+            note_prefix +
             "Chưa biết phụ huynh muốn tìm gia sư MÔN gì. " + goal_hint +
             "Hỏi anh/chị cần tìm gia sư môn nào cho bé (1 câu, tự nhiên). "
             f"Các môn Tutora có: {subjects_hint}.", history_contents)
@@ -498,6 +594,7 @@ async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
     # Thiếu lớp → hỏi lớp (LỚP là filter cứng, search thiếu lớp trả gia sư sai cấp).
     if ctx.grade_level_id is None:
         r = await _say(
+            note_prefix +
             f"Đã biết môn cần tìm là {cur_subject_name or 'môn đã chọn'} nhưng CHƯA biết bé học "
             "lớp mấy. Hỏi anh/chị bé nhà mình đang học lớp mấy (chỉ hỏi lớp, đừng hỏi lại môn).",
             history_contents)
@@ -507,6 +604,7 @@ async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
     # PH giục (rush) → bỏ qua, search luôn với slot hiện có (goal là câu hỏi mềm).
     if not ctx.goal and not rush:
         r = await _say(
+            note_prefix +
             f"Đã biết cần gia sư {cur_subject_name or ''} lớp {cur_grade or ''}. Hỏi 1 câu ngắn "
             "về MỤC TIÊU học của bé để tư vấn trúng: bé cần mất gốc/củng cố lại, nâng cao, hay "
             "ôn thi (chuyển cấp/HSG/SAT...)? Chỉ hỏi mục tiêu, đừng hỏi lại môn/lớp.",
@@ -522,6 +620,7 @@ async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
     if not rush and not ctx.preferences and not ctx.asked_preferences:
         patch_out["asked_preferences"] = True
         r = await _say(
+            note_prefix +
             f"Đã đủ thông tin chính (gia sư {cur_subject_name or ''} lớp {cur_grade or ''}, mục "
             f"tiêu {ctx.goal}). Trước khi tìm, hỏi GỘP trong 1 câu duy nhất: anh/chị muốn bé học "
             "online hay gia sư đến nhà, và có mong muốn gì thêm về gia sư không (cô hay thầy, "
@@ -530,6 +629,23 @@ async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
         return AgentResponse(
             reply=r or "Dạ anh/chị muốn bé học online hay gia sư đến nhà ạ? Anh/chị có mong muốn "
             "gì thêm về gia sư không (cô hay thầy, kiên nhẫn...)? Không có thì em tìm luôn ạ!",
+            context_patch=patch_fn())
+
+    # ── Chống SPAM CARD LẶP: câu hỏi kiến thức + ĐÃ có card gợi ý trước đó ──
+    # PH đang HỎI (knowledge_note có giá trị) chứ không xin xem gia sư mới, và card đã bắn
+    # ở lượt trước (allowed = shown_tutors không rỗng) → CHỈ trả lời câu hỏi, KHÔNG search
+    # lại + bắn lại card (bug thật 2026-07-11: mỗi câu hỏi về kỳ thi đều bị dội nguyên bộ
+    # card dù PH chưa có ý định chọn gia sư). PH giục (rush) → vẫn search như thường.
+    if knowledge_note and allowed and not rush:
+        r = await _say(
+            note_prefix +
+            "Phụ huynh đang HỎI kiến thức, và em ĐÃ gợi ý gia sư ở lượt trước rồi. Chỉ trả lời "
+            "đúng câu hỏi (theo nội dung ở trên), có thể chốt bằng 1 ý ngắn tự nhiên rằng nếu "
+            "anh/chị muốn em tìm/lọc gia sư theo mục tiêu này thì cứ nói em. TUYỆT ĐỐI không "
+            "giới thiệu lại danh sách gia sư, không nhắc lại tên các gia sư đã gợi ý.",
+            history_contents)
+        return AgentResponse(
+            reply=r or "Dạ anh/chị cần em tìm gia sư phù hợp cho mục tiêu này thì cứ nói em nhé ạ!",
             context_patch=patch_fn())
 
     # ── Đủ slot → SEARCH THẬT ──
@@ -542,6 +658,7 @@ async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
     if not tutors:
         # Không có gia sư phù hợp → nói THẬT, KHÔNG bịa.
         r = await _say(
+            note_prefix +
             f"Đã tìm nhưng CHƯA có gia sư {cur_subject_name or ''} lớp {cur_grade or ''} phù hợp "
             "với nhu cầu của phụ huynh trong hệ thống. Nói thật điều này một cách lịch sự, và gợi "
             "ý anh/chị thử nới tiêu chí hoặc để lại thông tin, em cập nhật sau. TUYỆT ĐỐI không "
@@ -554,6 +671,7 @@ async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
     # Có gia sư → LLM giới thiệu ĐÚNG những người trong 'shown' (không bịa, không nói tổng số).
     names_json = json.dumps(shown, ensure_ascii=False)
     r = await _say(
+        note_prefix +
         "Đã tìm được gia sư phù hợp. Giới thiệu NGẮN GỌN cho phụ huynh đúng những gia sư trong "
         f"danh sách sau (chỉ dùng đúng các tên này, KHÔNG thêm ai khác, KHÔNG bịa): {names_json}. "
         "Mỗi người 1 dòng: tên + 1 lý do ngắn hợp với nhu cầu "
