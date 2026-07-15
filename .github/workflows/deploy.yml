@@ -1,4 +1,4 @@
-name: CI / CD
+name: Deploy to Cloud Run
 
 on:
   push:
@@ -7,112 +7,55 @@ on:
       - 'app/**'
       - 'requirements.txt'
       - 'Dockerfile'
-      - 'docker-compose.yml'
       - '.github/workflows/deploy.yml'
   workflow_dispatch: {}
 
 env:
-  IMAGE_NAME: ghcr.io/haiquanng/tutora-ai
+  PROJECT_ID: tutora-ai
+  REGION: asia-southeast1
+  SERVICE: tutora-ai
+
+permissions:
+  contents: read
+  id-token: write
 
 jobs:
-  docker-push:
-    name: Docker Build & Push
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    outputs:
-      image-tag: ${{ steps.meta.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract image tags
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=sha,prefix=,format=short
-            type=raw,value=latest
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
   deploy:
-    name: Deploy to production
+    name: Build & Deploy to Cloud Run
     runs-on: ubuntu-latest
-    needs: docker-push
-    env:
-      SSH_HOST: ${{ secrets.SERVER_HOST }}
-      SSH_USER: ${{ secrets.SERVER_USER }}
-      SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
-      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-      IMAGE_TAG: ${{ needs.docker-push.outputs.image-tag }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: webfactory/ssh-agent@v0.9.0
+      - id: auth
+        name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
         with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+          project_id: ${{ env.PROJECT_ID }}
+          workload_identity_provider: projects/297280227892/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-deployer@tutora-ai.iam.gserviceaccount.com
 
-      - name: Add VPS to known hosts
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Cloud Run (build from source)
         run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan -p "${{ env.SSH_PORT }}" -H "${{ env.SSH_HOST }}" >> ~/.ssh/known_hosts
-
-      - name: Sync docker-compose.yml lên VPS
-        run: |
-          rsync -avz -e "ssh -p ${{ env.SSH_PORT }}" \
-            docker-compose.yml \
-            "${{ env.SSH_USER }}@${{ env.SSH_HOST }}:${{ env.DEPLOY_PATH }}/"
-
-      - name: Deploy trên VPS
+          gcloud run deploy "$SERVICE" \
+            --source . \
+            --project "$PROJECT_ID" \
+            --region "$REGION" \
+            --quiet
         env:
-          _IMAGE_NAME: ${{ env.IMAGE_NAME }}
-          _IMAGE_TAG: ${{ env.IMAGE_TAG }}
-          _DEPLOY_PATH: ${{ env.DEPLOY_PATH }}
-        run: |
-          ssh -p "${{ env.SSH_PORT }}" \
-            "${{ env.SSH_USER }}@${{ env.SSH_HOST }}" \
-            IMAGE_NAME="$_IMAGE_NAME" \
-            IMAGE_TAG="$_IMAGE_TAG" \
-            DEPLOY_PATH="$_DEPLOY_PATH" \
-            bash << 'ENDSSH'
-              set -euo pipefail
-              cd "$DEPLOY_PATH"
-              echo "▶ Deploying $IMAGE_NAME:$IMAGE_TAG"
-
-              # Pin image theo tag SHA bất biến (không dùng :latest để deploy).
-              sed -i '/^AI_IMAGE=/d' .env 2>/dev/null || true
-              echo "AI_IMAGE=$IMAGE_NAME:$IMAGE_TAG" >> .env
-
-              docker compose pull tutora-ai
-              # --wait: chờ healthcheck pass, fail nếu container không healthy -> deploy báo lỗi.
-              docker compose up -d --no-deps --force-recreate --wait tutora-ai
-              docker compose ps tutora-ai
-              docker compose logs --tail=40 tutora-ai
-              docker image prune -f
-          ENDSSH
+          SERVICE: ${{ env.SERVICE }}
+          PROJECT_ID: ${{ env.PROJECT_ID }}
+          REGION: ${{ env.REGION }}
 
       - name: Deployment summary
         if: always()
         run: |
-          echo "### Deploy tutora-ai 🚀" >> $GITHUB_STEP_SUMMARY
-          echo "- **Image**: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}" >> $GITHUB_STEP_SUMMARY
+          echo "### Deploy tutora-ai to Cloud Run 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service**: $SERVICE ($REGION)" >> $GITHUB_STEP_SUMMARY
           echo "- **Commit**: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+        env:
+          SERVICE: ${{ env.SERVICE }}
+          REGION: ${{ env.REGION }}
