@@ -12,10 +12,32 @@ class TutorChatContext(BaseModel):
     city: Optional[str] = None
     # Slot hội thoại (agent slot-filling) — NestJS persist qua context_patch giống grade.
     # goal: mục tiêu học (mất gốc/củng cố/nâng cao/ôn thi/luyện SAT...). preferences: mong
-    # muốn về gia sư (tính cách, cách dạy, hình thức). searched: đã search & ra card lần nào
-    # chưa (để agent biết đang ở giai đoạn tư vấn hay đã gợi ý → không hỏi lại vòng vo).
+    # muốn về gia sư (tính cách, cách dạy, hình thức). asked_preferences: đã hỏi lượt gộp
+    # tuỳ chọn (khu vực/hình thức + mong muốn) chưa — gate "hỏi 1 lần, mềm" của KB-A bước 4:
+    # hỏi đúng 1 lần rồi search dù PH có trả lời hay không (agents/agentscenarios.md).
     goal: Optional[str] = None
     preferences: Optional[str] = None
+    asked_preferences: Optional[bool] = None
+    # Ngân sách PH nêu (vd "dưới 200k" -> max_rate=200000) — filter CỨNG thật truyền sang
+    # .NET /recommend (minRate/maxRate), không chỉ nằm mờ trong text query preferences.
+    min_rate: Optional[float] = None
+    max_rate: Optional[float] = None
+    # "male" | "female" | null — PH ưu tiên giới tính gia sư (không bắt buộc).
+    tutor_gender: Optional[str] = None
+    # "vi" | "en" — bot (tutora-zalo-bot) tự nhận diện từ tin nhắn PH, gửi kèm mỗi lượt.
+    # Dùng để CHỈ ĐỊNH tường minh ngôn ngữ trả lời cho _say() thay vì chỉ suy luận từ
+    # tin nhắn cuối (từng không đủ mạnh khi task nội bộ dài và toàn tiếng Việt).
+    preferred_language: Optional[str] = None
+    # ── State 2-lượt "muốn tìm gia sư nữa" sau khi đã Matched (agents/agentscenarios.md
+    # cập nhật 2026-07-13) — PH đã được giới thiệu gia sư, giờ muốn tìm thêm/tìm lại:
+    # bot PHẢI hỏi rõ trước khi quyết định tìm trong chat hay mở lại Mini App form. ──
+    # True = lượt trước VỪA hỏi "đổi gia sư khác (giữ tiêu chí)" hay "nhu cầu khác hẳn"
+    # — lượt này đọc câu trả lời để rẽ nhánh, KHÔNG chạy pipeline tìm kiếm bình thường.
+    pending_reopen_choice: Optional[bool] = None
+    # True = PH vừa chọn "đổi gia sư khác, giữ tiêu chí" và bot VỪA hỏi lý do/yêu cầu
+    # thêm — lượt kế tiếp là câu trả lời đó, dùng để tìm lại NGAY, loại trừ gia sư đã
+    # gợi ý (allowed/shown_tutors), không hỏi thêm gì nữa.
+    refining_alternate_search: Optional[bool] = None
 
 
 # ── Session memory: tóm tắt history cũ khi user quay lại sau gap dài ──
@@ -87,12 +109,35 @@ class AgentContextPatch(BaseModel):
     # Slot hội thoại mới rút được trong lượt này → NestJS lưu, gửi lại lượt sau.
     goal: Optional[str] = None
     preferences: Optional[str] = None
+    # True khi agent VỪA hỏi lượt gộp tuỳ chọn — NestJS persist để lượt sau không hỏi lại.
+    asked_preferences: Optional[bool] = None
+    min_rate: Optional[float] = None
+    max_rate: Optional[float] = None
+    teaching_mode: Optional[str] = None
+    city: Optional[str] = None
+    # State 2-lượt "muốn tìm gia sư nữa" (xem TutorChatContext) — patch cả True (bắt đầu hỏi)
+    # lẫn False tường minh (đã đọc xong câu trả lời, xoá cờ) để NestJS merge generic đúng.
+    pending_reopen_choice: Optional[bool] = None
+    refining_alternate_search: Optional[bool] = None
 
 class AgentResponse(BaseModel):
     reply: str
     tutors: List[Dict[str, Any]] = []        # proxy shape từ .NET recommend; render card riêng
     # Cờ bàn giao sang deterministic booking flow (NestJS xử lý, agent KHÔNG tự đặt lịch).
     handoff_to_booking: bool = False
+    # PH muốn ĐỔI tiêu chí tìm kiếm giữa chat (đã Matched) -> NestJS gửi lại nút mở Mini
+    # App (điền sẵn giá trị cũ từ context hiện có), KHÔNG hỏi qua chat nữa (mở form vốn đã
+    # là hành động "an toàn", không cam kết gì cho tới khi PH bấm Tìm gia sư lần nữa).
+    reopen_mini_app: bool = False
+    # True = PH muốn NHU CẦU KHÁC HẲN (đổi môn/lớp/giới tính...), Mini App PHẢI để form
+    # TRỐNG cho PH điền lại từ đầu — KHÔNG được tự auto-search bằng agentCtx cũ (Mini App
+    # tự prefill từ /prefill rồi auto-skip qua kết quả nếu đủ subject+grade, xem
+    # MiniAppSearchFormPage.tsx). False (mặc định) = an toàn để Mini App auto-skip nếu có
+    # đủ dữ liệu cũ (vd resend_form — nút lỗi, tiêu chí không đổi, hoặc lần đầu thiếu slot
+    # thì auto-skip cũng vô hại vì chưa có gì để prefill). Bug thật 2026-07-14: thiếu cờ
+    # này khiến chọn "nhu cầu khác" vẫn bị auto-skip hiện lại kết quả CŨ trước khi PH kịp
+    # điền gì mới.
+    reopen_mini_app_fresh: bool = False
     # Khi agent gặp điểm nhạy cảm (đổi lớp/bé/môn, hoặc ý định booking) -> hỏi xác nhận,
     # CHƯA hành động. NestJS render nút từ suggestions, chờ phụ huynh bấm.
     awaiting_confirmation: bool = False
@@ -100,6 +145,31 @@ class AgentResponse(BaseModel):
     suggestions: List[str] = []              # các lựa chọn ngắn cho phụ huynh bấm
     # Môn/lớp mới sau khi đổi giữa chat -> NestJS lưu để các turn sau gửi đúng subject_id.
     context_patch: Optional[AgentContextPatch] = None
+
+# ── Direct search: Mini App gọi thẳng, KHÔNG qua LLM/hội thoại (agent.run_agent) ──
+# Dùng khi tiêu chí đã đủ rõ ràng từ form (subject_id/grade_level_id là id thật, không phải
+# text cần LLM trích) — vd hiển thị kết quả ngay trong Mini App + nút "tìm gia sư khác".
+# KHÔNG đi qua run_agent() vì gate disambiguation "đổi gia sư khác/nhu cầu khác"
+# (agent.py::_handle_find_tutor) sẽ chặn lại hỏi qua chat thay vì trả tutor ngay — sai mục
+# đích cho tương tác nút bấm trong Mini App, vốn đã rõ ý (không cần hỏi).
+class DirectSearchRequest(BaseModel):
+    subject_id: int
+    grade_level_id: Optional[int] = None
+    goal: Optional[str] = None
+    preferences: Optional[str] = None
+    min_rate: Optional[float] = None
+    max_rate: Optional[float] = None
+    teaching_mode: Optional[str] = None
+    city: Optional[str] = None
+    tutor_gender: Optional[str] = None
+    # Loại các tutorId này khỏi kết quả — dùng cho nút "tìm gia sư khác" (không lặp lại
+    # gia sư đã hiện trước đó).
+    exclude_tutor_ids: List[str] = []
+    top_k: int = 5
+
+class DirectSearchResponse(BaseModel):
+    tutors: List[Dict[str, Any]] = []
+
 
 class SolveRequest(BaseModel):
     text: Optional[str] = None
