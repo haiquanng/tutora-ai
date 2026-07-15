@@ -31,8 +31,11 @@ from google.genai import errors as genai_errors
 
 from ..core.config import get_settings
 from ..core.dependencies import get_gemini_client, get_supabase
-from ..models.schemas import AgentRequest, AgentResponse, AgentContextPatch, TutorChatFilters
-from .tutor_chat import _fetch_candidates, _get_subjects
+from ..models.schemas import (
+    AgentRequest, AgentResponse, AgentContextPatch, TutorChatFilters,
+    TutorChatContext, DirectSearchRequest, DirectSearchResponse,
+)
+from .tutor_chat import _fetch_candidates, _get_subjects, _normalize_city
 from .rag import retrieve_chunks
 
 _settings = get_settings()
@@ -93,6 +96,10 @@ def _sanitize_reply(text: str) -> str:
     text = _ID_LEAK_PAREN_RE.sub("", text)
     text = _ID_LEAK_BARE_RE.sub("", text)
     text = _ID_TOKEN_RE.sub("", text)
+    # Lưới an toàn: LLM đôi khi tự bịa placeholder [link form]/[đường dẫn]... dù đã cấm rõ
+    # trong prompt (bug thật 2026-07-13, xem reopen_mini_app) — nút bấm thật do hệ thống tự
+    # gửi kèm ngay sau, KHÔNG phải LLM tự tạo link nào cả.
+    text = re.sub(r"\[[^\]]*\b(link|url|form|đường dẫn|duong dan)\b[^\]]*\]", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
     text = re.sub(r"\*([^*]+)\*", r"\1", text)
     text = text.replace("`", "")
@@ -104,10 +111,19 @@ def _sanitize_reply(text: str) -> str:
 
 
 # ───────────────────────── GIỌNG / STYLE cho phần DIỄN ĐẠT ─────────────────────────
+# NGÔN NGỮ: mirror đúng ngôn ngữ tin nhắn CUỐI CÙNG của phụ huynh trong contents (luôn là
+# tin nhắn thật — xem _say()), không cố định tiếng Việt. Bot (tutora-zalo-bot) đã tự nhận
+# diện ngôn ngữ qua context.preferredLanguage và gửi trigger message/Mini App form đúng
+# ngôn ngữ đó, nên tin nhắn cuối cùng LUÔN phản ánh đúng ngôn ngữ PH đang dùng.
 _STYLE = (
-    "Em là trợ lý của Tutora, giúp phụ huynh tìm gia sư cho con. Xưng 'em', gọi phụ huynh "
-    "'anh/chị'. Lễ phép, thân thiện, tự nhiên như người Việt tư vấn thật; có 'dạ', 'ạ' đúng "
-    "mực (đừng lạm dụng). NGẮN GỌN 1-2 câu, tiếng Việt có dấu, tránh dịch máy. "
+    "Em là trợ lý của Tutora, giúp phụ huynh tìm gia sư cho con. "
+    "TRẢ LỜI BẰNG ĐÚNG NGÔN NGỮ của tin nhắn GẦN NHẤT từ phụ huynh (tiếng Việt hoặc tiếng "
+    "Anh) — không tự dịch sang ngôn ngữ khác, không trộn 2 thứ tiếng trong 1 câu. "
+    "Nếu tin nhắn là tiếng Việt: xưng 'em', gọi phụ huynh 'anh/chị', lễ phép, thân thiện, tự "
+    "nhiên như người Việt tư vấn thật; có 'dạ', 'ạ' đúng mực (đừng lạm dụng), có dấu đầy đủ. "
+    "Nếu tin nhắn là tiếng Anh: giọng thân thiện, chuyên nghiệp, tự nhiên như tư vấn viên "
+    "bản ngữ thật, không dịch máy, không giữ lại từ xưng hô kiểu Việt ('em', 'anh/chị', 'dạ'). "
+    "NGẮN GỌN 1-2 câu. "
     "Zalo KHÔNG render markdown: TUYỆT ĐỐI không dùng '**', '*', '#', '`', gạch đầu dòng, "
     "không in đậm/nghiêng. Không để lộ id kỹ thuật — chỉ gọi gia sư bằng TÊN."
 )
@@ -122,7 +138,8 @@ _INTENT_VALUES = [
     "availability",     # hỏi lịch rảnh/giá 1 gia sư đã gợi ý
     "faq",              # hỏi về Tutora (chính sách, cách hoạt động, giá chung)
     "booking",          # muốn đặt lịch / đăng ký học 1 gia sư
-    "change_context",   # đổi môn / đổi lớp / đổi bé / đổi mục tiêu (cần confirm)
+    "change_context",   # muốn đổi hẳn tiêu chí tìm gia sư (môn/lớp/mục tiêu...) -> mở lại Mini App
+    "resend_form",      # nút/form Mini App không bấm được / lỗi / mất -> cần GỬI LẠI nút
     "chitchat",         # chào hỏi / lạc đề / xác nhận ngắn ('ok','được')
 ]
 
@@ -140,6 +157,10 @@ def _extract_config(subjects_hint: str, slots: dict, shown_hint: str, message: s
         '"preferences": <mong muốn về gia sư 1 cụm ngắn nếu nêu, vd "kiên nhẫn","nghiêm khắc","học online"; null nếu không nhắc>, '
         '"tutor_ref": <TÊN gia sư phụ huynh đang hỏi tới nếu có, lấy từ danh sách đã gợi ý; null nếu không>, '
         '"rush": <true nếu phụ huynh GIỤC xem gia sư ngay ("đưa tôi gia sư","có ai không","xem luôn đi","nhanh lên"); false nếu bình thường>, '
+        '"min_rate": <số VND/giờ nếu PH nêu mức giá TỐI THIỂU, vd "trên 150k" -> 150000; null nếu không nhắc>, '
+        '"max_rate": <số VND/giờ nếu PH nêu mức giá TỐI ĐA/ngân sách, vd "dưới 200k","khoảng 200k đổ lại" -> 200000, "giá cao quá" (đang xem gia sư có giá X) -> khoảng X; null nếu không nhắc>, '
+        '"teaching_mode": <"online" | "offline" | "both" nếu PH nêu hình thức học (tại nhà/offline = "offline", online = "online"); null nếu không nhắc>, '
+        '"city": <tên thành phố/tỉnh nếu PH nêu khu vực học tại nhà, vd "TP.HCM","Hà Nội"; null nếu không nhắc>, '
         '"knowledge_note": <nếu tin nhắn có câu HỎI kiến thức giáo dục đại chúng (nội dung/cấu trúc 1 kỳ '
         'thi, kỹ năng cần học, vd "GMAT thi gồm phần Toán tư duy và Tiếng Anh (Verbal)") → 1 câu trả lời '
         'NGẮN GỌN, giọng THAM KHẢO không tuyệt đối ("thường gồm...", "phổ biến là..."); TUYỆT ĐỐI KHÔNG '
@@ -202,6 +223,12 @@ def _extract_config(subjects_hint: str, slots: dict, shown_hint: str, message: s
         "- Câu ngắn xác nhận ('ok','được','có','đúng rồi') sau khi trợ lý hỏi chuyện KHÁC (không "
         "phải đổi môn/lớp) → intent='chitchat'.\n"
         "- Phụ huynh giục xem gia sư ('đưa tôi gia sư','có ai không','xem gia sư') → intent='find_tutor' và rush=true.\n"
+        "- Phụ huynh nói nút/form Mini App KHÔNG bấm được, bị lỗi, không hiện ra, biến mất, hết "
+        "hạn, hay xin gửi lại (vd 'không bấm được nút', 'nút bị lỗi', 'gửi lại nút giúp em', "
+        "\"I can't click that button\", \"button doesn't work\", \"please send it again\", "
+        "\"present that button again\") → intent='resend_form'. KHÔNG nhầm với 'change_context' "
+        "(đổi tiêu chí) hay 'find_tutor' — đây là PH đang gặp lỗi kỹ thuật với nút cũ, cần gửi "
+        "lại NÚT Y HỆT, không phải đổi gì cả.\n"
         "- Nếu tin nhắn TRƯỚC của trợ lý hỏi về mong muốn thêm/khu vực/hình thức học mà phụ "
         "huynh trả lời KHÔNG có yêu cầu ('sao cũng được','không có gì','gì cũng được','tùy em', "
         "kể cả 'ừ','ok','được' ngay sau câu hỏi đó — quy tắc này ƯU TIÊN hơn quy tắc câu ngắn "
@@ -232,10 +259,20 @@ async def _extract_turn(history_contents: list, message: str, slots: dict,
         # Không hiểu được → coi như muốn tìm gia sư, để luồng hỏi tiếp (an toàn).
         # Trả ĐỦ key (code sau truy cập ex["subject"]... trực tiếp — thiếu key là KeyError).
         return {"intent": "find_tutor", "subject": None, "grade": None, "goal": None,
-                "preferences": None, "tutor_ref": None, "rush": False, "knowledge_note": None}
+                "preferences": None, "tutor_ref": None, "rush": False, "knowledge_note": None,
+                "min_rate": None, "max_rate": None, "teaching_mode": None, "city": None}
     intent = data.get("intent")
     if intent not in _INTENT_VALUES:
         intent = "find_tutor"
+
+    def _num(key):
+        v = data.get(key)
+        return float(v) if isinstance(v, (int, float)) else None
+
+    teaching_mode = data.get("teaching_mode")
+    if teaching_mode not in ("online", "offline", "both"):
+        teaching_mode = None
+
     return {
         "intent": intent,
         "subject": (data.get("subject") or None),
@@ -245,15 +282,19 @@ async def _extract_turn(history_contents: list, message: str, slots: dict,
         "tutor_ref": (data.get("tutor_ref") or None),
         "rush": bool(data.get("rush")),
         "knowledge_note": (data.get("knowledge_note") or None),
+        "min_rate": _num("min_rate"),
+        "max_rate": _num("max_rate"),
+        "teaching_mode": teaching_mode,
+        "city": (data.get("city") or None),
     }
 
 
 # ───────────────────────── DIỄN ĐẠT (LLM sinh câu chữ 1 lượt) ─────────────────────────
-async def _say(task: str, history_contents: list | None = None) -> str:
-    """LLM sinh 1 câu tiếng Việt theo yêu cầu 'task'. Dùng cho hỏi thêm / giới thiệu / báo lỗi.
+async def _say(task: str, history_contents: list | None = None, lang: str = "vi") -> str:
+    """LLM sinh 1 câu theo yêu cầu 'task'. Dùng cho hỏi thêm / giới thiệu / báo lỗi.
     task đã chứa đủ dữ kiện; LLM chỉ diễn đạt, không tự bịa thêm thông tin.
 
-    QUAN TRỌNG (2 bug thật production 2026-07-11, đọc kỹ trước khi sửa):
+    QUAN TRỌNG (3 bug thật production 2026-07, đọc kỹ trước khi sửa):
     1. task đưa vào system_instruction, KHÔNG append như 1 lượt "user" giả — nếu để trong
        contents, model hiểu nhầm là tin nhắn thật của phụ huynh và "xác nhận đã hiểu hướng
        dẫn" thay vì thực hiện (RÒ RỈ PROMPT: bot từng trả lời "Dạ em đã nắm được hướng dẫn
@@ -263,9 +304,20 @@ async def _say(task: str, history_contents: list | None = None) -> str:
        Gemini hiểu là "tiếp tục trả lời câu đang dang dở trong history" → trả lời câu hỏi
        của LƯỢT TRƯỚC, lệch 1 nhịp ở mọi lượt (OFF-BY-ONE), bỏ qua task trong system
        instruction. Lượt giả bên dưới chỉ còn là fallback cho history rỗng bất thường.
+    3. lang="en" mà chỉ dựa "mirror tin nhắn cuối" trong _STYLE là KHÔNG đủ mạnh — task nội
+       bộ dài, toàn tiếng Việt (tên môn, hướng dẫn) thường lấn át 1 tin nhắn ngắn ở cuối
+       contents, Gemini vẫn trả lời tiếng Việt (bug thật 2026-07-13: form tiếng Anh nhưng
+       agent trả lời tiếng Việt). Phải ra lệnh TƯỜNG MINH ngay trong instruction, không chỉ
+       suy luận ngầm.
     """
+    lang_directive = (
+        "\n\nBẮT BUỘC: viết TOÀN BỘ câu trả lời bên dưới bằng TIẾNG ANH tự nhiên (không dịch "
+        "máy, không giữ lại xưng hô kiểu Việt như 'em'/'anh chị'/'dạ'/'ạ'), BẤT KỂ nhiệm vụ "
+        "nội bộ phía dưới được viết bằng tiếng Việt."
+        if lang == "en" else ""
+    )
     instruction = (
-        _STYLE + "\n\n"
+        _STYLE + lang_directive + "\n\n"
         "NHIỆM VỤ NỘI BỘ (chỉ dành riêng cho bạn — TUYỆT ĐỐI không nhắc lại, không xác nhận, "
         "không thừa nhận đang làm theo hướng dẫn dưới bất kỳ hình thức nào; không nói 'em đã "
         "nắm được', 'em sẽ luôn', 'theo hướng dẫn này'... Chỉ xuất ra ĐÚNG câu trả lời tự nhiên "
@@ -343,15 +395,24 @@ async def _dotnet_get(path: str) -> dict | None:
 
 
 # ───────────────────────── SEARCH GIA SƯ (deterministic) ─────────────────────────
-async def _run_search(ctx, query: str) -> tuple[list, list]:
-    """Gọi Ranking Core (.NET /recommend). Trả (full_list_để_render, shown_summary_cho_LLM)."""
-    filters = TutorChatFilters(subject_id=ctx.subject_id)
+async def _run_search(ctx, query: str, exclude_ids: set[str] | None = None) -> tuple[list, list]:
+    """Gọi Ranking Core (.NET /recommend). Trả (full_list_để_render, shown_summary_cho_LLM).
+    min_rate/max_rate/teaching_mode/city: filter CỨNG thật (ctx.teaching_mode/city đã có sẵn
+    trong context, _fetch_candidates tự đọc từ đó — chỉ min/max_rate cần truyền qua filters).
+    exclude_ids: loại các tutorId này khỏi kết quả (dùng khi PH muốn "đổi gia sư khác" cùng
+    tiêu chí — .NET /recommend không hỗ trợ exclude, lọc phía client cho nhanh, xem
+    _handle_alternate_search)."""
+    filters = TutorChatFilters(
+        subject_id=ctx.subject_id, min_rate=ctx.min_rate, max_rate=ctx.max_rate,
+        tutor_gender=ctx.tutor_gender)
     try:
         content = await _fetch_candidates(ctx, filters, query=query)
         tutors = content.get("tutors", []) or []
         # Thứ tự do Ranking Core; chỉ khi core fail mới hạ gia sư 0-review xuống cuối.
         if not content.get("aiRanked"):
             tutors.sort(key=lambda t: (t.get("totalReviews") or 0) == 0)
+        if exclude_ids:
+            tutors = [t for t in tutors if t.get("tutorId") not in exclude_ids]
     except Exception as e:
         print(f"agent _run_search error: {e}")
         return [], []
@@ -366,12 +427,30 @@ async def _run_search(ctx, query: str) -> tuple[list, list]:
     return tutors, summary
 
 
+async def search_tutors_direct(body: DirectSearchRequest) -> DirectSearchResponse:
+    """Search THẲNG, KHÔNG qua run_agent()/LLM — dùng cho Mini App hiển thị kết quả ngay
+    trong form + nút "tìm gia sư khác" (loại trừ exclude_tutor_ids). Tiêu chí từ form đã đủ
+    rõ ràng (id thật, không phải text cần trích), nên bỏ qua toàn bộ gate hội thoại/
+    disambiguation của _handle_find_tutor — những gate đó chỉ hợp lý khi PH gõ tự do qua
+    chat, không hợp cho một cú bấm nút đã rõ ý."""
+    ctx = TutorChatContext(
+        subject_id=body.subject_id, grade_level_id=body.grade_level_id,
+        teaching_mode=body.teaching_mode, city=_normalize_city(body.city),
+        tutor_gender=body.tutor_gender, min_rate=body.min_rate, max_rate=body.max_rate,
+    )
+    query = ", ".join(x for x in [body.goal, body.preferences] if x)
+    exclude_ids = set(body.exclude_tutor_ids) if body.exclude_tutor_ids else None
+    tutors, _ = await _run_search(ctx, query, exclude_ids=exclude_ids)
+    return DirectSearchResponse(tutors=tutors[: max(1, body.top_k)])
+
+
 # ───────────────────────── AGENT (điều phối deterministic) ─────────────────────────
 async def run_agent(body: AgentRequest) -> AgentResponse:
     import time
     _t0 = time.time()
     ctx = body.context
-    print(f"[DEBUG-IN] t={_t0:.3f} message={body.message!r} ctx.goal={ctx.goal!r}")
+    lang = ctx.preferred_language if ctx.preferred_language in ("vi", "en") else "vi"
+    print(f"[DEBUG-IN] t={_t0:.3f} message={body.message!r} ctx.goal={ctx.goal!r} lang={lang!r}")
 
     # Slot hiện có (từ context NestJS gửi kèm). subject_id/grade_level_id là id thật;
     # goal/preferences là text. subject/grade "đọc được" (tên/số) suy ra khi cần hỏi.
@@ -405,7 +484,7 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
             "Phụ huynh gõ một mã/id kỹ thuật (không phải nhu cầu thật — nhiều khả năng là dev "
             "đang test hoặc trêu, vì phụ huynh thật không biết/không thấy id này). KHÔNG xác nhận "
             "hay tra cứu theo id đó. Đáp gọn, lịch sự, mời anh/chị cho biết TÊN gia sư hoặc nhu "
-            "cầu tìm gia sư để được hỗ trợ.", history_contents)
+            "cầu tìm gia sư để được hỗ trợ.", history_contents, lang=lang)
         return AgentResponse(
             reply=r or "Dạ anh/chị cho em biết tên gia sư hoặc nhu cầu để em hỗ trợ ạ.")
 
@@ -452,13 +531,17 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
     last_model_msg = next((m.content for m in reversed(body.history) if m.role != "user"), "")
     answering_confirm = ("đúng không" in last_model_msg.lower()
                          or "đúng ko" in last_model_msg.lower())
-    if (switching_subject or switching_grade) and body.shown_tutors and not answering_confirm:
+    # ctx.pending_reopen_choice/refining_alternate_search: đang ở giữa dialog 2-lượt "tìm gia
+    # sư nữa" (xem dưới) — lượt này PHẢI do _handle_reopen_choice/_handle_alternate_search xử
+    # lý trọn vẹn, không để gate đổi môn/lớp này giành mất lượt trả lời của PH.
+    if (switching_subject or switching_grade) and body.shown_tutors and not answering_confirm \
+            and not ctx.pending_reopen_choice and not ctx.refining_alternate_search:
         what = "môn" if switching_subject else "lớp"
         target = ex["subject"] if switching_subject else f"lớp {ex['grade']}"
         q = await _say(
             f"Phụ huynh muốn đổi {what} sang {target} (khác với đang tìm). Hỏi 1 câu xác nhận "
             "ngắn gọn, lịch sự rằng anh/chị muốn chuyển sang tìm gia sư mới cho lựa chọn này, "
-            "đúng không ạ.", history_contents)
+            "đúng không ạ.", history_contents, lang=lang)
         # KHÔNG áp patch ở đây: nếu PH nói "không, giữ như cũ" thì môn/lớp cũ phải nguyên vẹn.
         # Lượt sau PH xác nhận ("đúng rồi") → extract rút lại môn/lớp mới → áp patch + search.
         return AgentResponse(
@@ -496,6 +579,23 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
                 ctx.preferences = merged
                 patch_out["preferences"] = merged
 
+    # Filter CỨNG thật (ngân sách + hình thức học) — trước đây chỉ nằm mờ trong text
+    # preferences, .NET /recommend hỗ trợ minRate/maxRate/teachingMode/city nhưng
+    # _run_search chưa bao giờ truyền (gap thật, xem agents/agentscenarios.md KB-A đối
+    # chiếu). Persist qua context_patch để giữ qua các lượt như subject/grade.
+    if ex["min_rate"] is not None:
+        ctx.min_rate = ex["min_rate"]
+        patch_out["min_rate"] = ex["min_rate"]
+    if ex["max_rate"] is not None:
+        ctx.max_rate = ex["max_rate"]
+        patch_out["max_rate"] = ex["max_rate"]
+    if ex["teaching_mode"]:
+        ctx.teaching_mode = ex["teaching_mode"]
+        patch_out["teaching_mode"] = ex["teaching_mode"]
+    if ex["city"]:
+        ctx.city = ex["city"]
+        patch_out["city"] = ex["city"]
+
     intent = ex["intent"]
     print(f"[DEBUG-ROUTE] intent={intent!r} knowledge_note={ex.get('knowledge_note')!r} "
           f"subject_id={ctx.subject_id!r} grade_level_id={ctx.grade_level_id!r} "
@@ -503,32 +603,66 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
 
     # ── (2) ĐIỀU PHỐI theo intent (code quyết, không phải LLM) ──
 
+    # ── Dialog 2-lượt "muốn tìm gia sư nữa" sau khi đã Matched (agents/agentscenarios.md,
+    # cập nhật 2026-07-13) — ưu tiên xử lý TRƯỚC mọi intent khác: lượt này là câu TRẢ LỜI
+    # cho câu hỏi bot vừa hỏi ở lượt trước, không phải yêu cầu mới nên intent extract có
+    # thể đoán sai (vd PH gõ "1" hoặc "chưa ưng ý lắm" dễ bị hiểu nhầm thành chitchat).
+    if ctx.refining_alternate_search:
+        return await _handle_alternate_search(
+            ctx, cur_subject_name, cur_grade, body.message, history_contents,
+            allowed, _patch, patch_out, lang=lang)
+    if ctx.pending_reopen_choice:
+        return await _handle_reopen_choice(
+            ctx, body.message, history_contents, _patch, patch_out, lang=lang)
+
     # FAQ: RAG. Rỗng → câu an toàn, KHÔNG bịa.
     if intent == "faq":
-        return await _handle_faq(body.message, history_contents, _patch())
+        return await _handle_faq(body.message, history_contents, _patch(), lang=lang)
 
     # Hỏi chi tiết / lịch 1 gia sư đã gợi ý.
     if intent in ("tutor_detail", "availability"):
         return await _handle_tutor_query(intent, ex["tutor_ref"], allowed,
-                                         history_contents, _patch())
+                                         history_contents, _patch(), lang=lang)
 
-    # Đổi ngữ cảnh (môn/lớp/bé/mục tiêu) → confirm trước khi tìm lại.
+    # Đổi tiêu chí tìm gia sư (môn/lớp/ngân sách/khu vực/mục tiêu...) → mở lại Mini App
+    # (điền sẵn giá trị cũ, NestJS tự lấy từ context hiện có) thay vì hỏi xác nhận qua chat.
+    # Mở form là hành động AN TOÀN — không cam kết gì cho tới khi PH bấm "Tìm gia sư" lần
+    # nữa trong form, nên KHÔNG cần bước confirm như trước.
     if intent == "change_context":
-        q = await _say(
-            "Phụ huynh muốn đổi tiêu chí tìm gia sư (môn/lớp/mục tiêu). Hãy hỏi 1 câu xác nhận "
-            "ngắn gọn, lịch sự, xác nhận thay đổi đó rồi mới tìm lại gia sư mới.",
-            history_contents)
+        r = await _say(
+            "Phụ huynh muốn đổi tiêu chí tìm gia sư. Nói 1 câu ngắn, tự nhiên rằng em gửi lại "
+            "form để anh/chị chỉnh sửa nhanh (thông tin cũ vẫn còn sẵn trong form). "
+            "TUYỆT ĐỐI KHÔNG chèn link, URL, hay placeholder kiểu [link]/[form]/[đường dẫn] "
+            "trong câu trả lời — nút bấm mở form sẽ được HỆ THỐNG tự gửi kèm NGAY SAU câu này, "
+            "bạn chỉ cần nói dẫn, không tự tạo link giả.",
+            history_contents, lang=lang)
         return AgentResponse(
-            reply=q or "Dạ anh/chị muốn đổi tiêu chí tìm gia sư, đúng không ạ?",
-            awaiting_confirmation=True, confirm_type="context_change",
-            suggestions=["Đúng rồi", "Không, giữ như cũ"], context_patch=_patch(),
+            reply=r or "Dạ em gửi lại form để anh/chị chỉnh sửa tiêu chí tìm gia sư nhé ạ!",
+            reopen_mini_app=True, reopen_mini_app_fresh=True, context_patch=_patch(),
+        )
+
+    # PH báo nút/form Mini App không bấm được / lỗi → GỬI LẠI nút y hệt (KHÔNG hỏi lại thông
+    # tin qua chat — trước đây rơi vào chitchat/faq nên bot chỉ hỏi lại môn/lớp qua text, PH
+    # phải gõ tay dù bug thật chỉ nằm ở nút, không phải PH thiếu thông tin). context_patch=None:
+    # không đổi slot gì, chỉ gửi lại đúng form với dữ liệu hiện có.
+    if intent == "resend_form":
+        r = await _say(
+            "Nút/form Mini App của phụ huynh bị lỗi không bấm được. Xin lỗi ngắn gọn, tự nhiên "
+            "và nói em gửi lại nút ngay. TUYỆT ĐỐI KHÔNG chèn link, URL, hay placeholder kiểu "
+            "[link]/[form]/[đường dẫn] trong câu trả lời — nút bấm mở form sẽ được HỆ THỐNG tự "
+            "gửi kèm NGAY SAU câu này, bạn chỉ cần nói dẫn, không tự tạo link giả. KHÔNG hỏi lại "
+            "môn/lớp/thông tin gì qua chat — lỗi nằm ở nút, không phải thiếu thông tin.",
+            history_contents, lang=lang)
+        return AgentResponse(
+            reply=r or "Dạ em xin lỗi vì sự bất tiện, em gửi lại nút ngay đây ạ!",
+            reopen_mini_app=True, context_patch=_patch(),
         )
 
     # Đặt lịch → confirm → handoff booking (NestJS xử lý deterministic).
     if intent == "booking":
         q = await _say(
             "Phụ huynh muốn đặt lịch học với gia sư. Hãy hỏi 1 câu xác nhận ngắn gọn, lịch sự "
-            "rằng anh/chị muốn đặt lịch, đúng không ạ.", history_contents)
+            "rằng anh/chị muốn đặt lịch, đúng không ạ.", history_contents, lang=lang)
         return AgentResponse(
             reply=q or "Dạ anh/chị muốn đặt lịch học với gia sư này, đúng không ạ?",
             awaiting_confirmation=True, confirm_type="booking", handoff_to_booking=True,
@@ -540,19 +674,20 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
         r = await _say(
             "Phụ huynh gửi câu chào hoặc câu ngắn không rõ nhu cầu tìm gia sư. Chào lại thân "
             "thiện và hỏi anh/chị cần tìm gia sư môn gì, cho bé lớp mấy. KHÔNG nói 'chưa có thông tin'.",
-            history_contents)
+            history_contents, lang=lang)
         return AgentResponse(reply=r or "Dạ em chào anh/chị ạ! Anh/chị cần tìm gia sư môn gì, "
                              "cho bé lớp mấy để em hỗ trợ ạ?", context_patch=_patch())
 
     # ── find_tutor: gate slot deterministic ──
     return await _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
                                     body.message, history_contents, allowed, _patch, patch_out,
-                                    rush=ex["rush"], knowledge_note=ex["knowledge_note"])
+                                    rush=ex["rush"], knowledge_note=ex["knowledge_note"], lang=lang)
 
 
 async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
                              message, history_contents, allowed, patch_fn, patch_out,
-                             rush: bool = False, knowledge_note: str | None = None) -> AgentResponse:
+                             rush: bool = False, knowledge_note: str | None = None,
+                             lang: str = "vi") -> AgentResponse:
     """Gate slot (subject+grade+goal) rồi search THẬT. Thiếu slot → hỏi đúng cái thiếu.
     rush=True (PH giục) → bỏ qua câu hỏi mềm (goal, lượt gộp tuỳ chọn), search ngay với slot
     hiện có — tôn trọng sự sốt ruột hơn thu đủ dữ liệu (KB-A). subject/grade vẫn bắt buộc.
@@ -568,37 +703,46 @@ async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
             "này vào ĐẦU phản hồi một cách tự nhiên (không nói 'theo kiến thức chung' hay bất kỳ "
             "cụm meta nào), rồi mới tiếp tục nội dung dưới đây, TRONG CÙNG 1 tin nhắn:\n"
         )
-    # Thiếu môn → hỏi môn (kèm gợi ý map nếu là mục tiêu SAT/IELTS chưa rõ môn).
-    if ctx.subject_id is None:
-        # Nếu ĐÃ biết mục tiêu (vd 'luyện thi SAT') mà chưa rõ môn → gợi ý map mục tiêu về
-        # môn cụ thể ngay trong câu hỏi, tránh hỏi trống 'muốn môn gì' lặp lại vô duyên.
-        goal_hint = ""
-        if ctx.goal:
-            goal_hint = (
-                f"Phụ huynh đã nêu mục tiêu: '{ctx.goal}'. Đây là MỤC TIÊU, không phải môn — "
-                "Tutora tìm gia sư môn phổ thông để luyện mục tiêu đó (KHÔNG được nói Tutora "
-                "không có chương trình này). Dựa vào kiến thức chung về mục tiêu/kỳ thi đó, tự "
-                "gợi ý (các) môn phổ thông phù hợp nhất rồi hỏi bé muốn tập trung môn nào (vd "
-                "SAT → Toán hoặc Tiếng Anh; IELTS/TOEIC → Tiếng Anh; thi HSG/chuyển cấp/THPTQG/"
-                "đánh giá năng lực/kỳ thi khác → hỏi thẳng bé cần môn nào, vì đây là ví dụ minh "
-                "hoạ chứ KHÔNG phải danh sách đầy đủ — áp dụng suy luận tương tự cho MỌI mục tiêu "
-                "khác chưa liệt kê ở đây). ")
-        r = await _say(
-            note_prefix +
-            "Chưa biết phụ huynh muốn tìm gia sư MÔN gì. " + goal_hint +
-            "Hỏi anh/chị cần tìm gia sư môn nào cho bé (1 câu, tự nhiên). "
-            f"Các môn Tutora có: {subjects_hint}.", history_contents)
-        return AgentResponse(reply=r or "Dạ anh/chị muốn tìm gia sư môn gì cho bé ạ?",
-                             context_patch=patch_fn())
 
-    # Thiếu lớp → hỏi lớp (LỚP là filter cứng, search thiếu lớp trả gia sư sai cấp).
-    if ctx.grade_level_id is None:
+    # ── PH ĐÃ được giới thiệu gia sư (allowed không rỗng) và giờ lại muốn tìm gia sư nữa
+    # → KHÔNG tự ý search lại hay mở form ngay: hỏi rõ 2 trường hợp trước (agents/
+    # agentscenarios.md, spec 2026-07-13). subject_id/grade_level_id chắc chắn đã có ở đây
+    # (không có thì đã không có allowed), nên đây không phải gate "thiếu slot" bên dưới.
+    if allowed and not knowledge_note:
+        patch_out["pending_reopen_choice"] = True
         r = await _say(
             note_prefix +
-            f"Đã biết môn cần tìm là {cur_subject_name or 'môn đã chọn'} nhưng CHƯA biết bé học "
-            "lớp mấy. Hỏi anh/chị bé nhà mình đang học lớp mấy (chỉ hỏi lớp, đừng hỏi lại môn).",
-            history_contents)
-        return AgentResponse(reply=r or "Dạ bé nhà mình đang học lớp mấy ạ?", context_patch=patch_fn())
+            "Phụ huynh ĐÃ được giới thiệu gia sư trước đó, giờ muốn tìm gia sư nữa. CHỈ hỏi rõ "
+            "1 câu PH đang ở trường hợp nào: (1) chưa ưng ý gia sư đã gợi ý, muốn đổi sang gia sư "
+            "KHÁC nhưng vẫn giữ nguyên môn/lớp đang tìm; hay (2) muốn tìm gia sư cho nhu cầu KHÁC "
+            "hẳn (môn khác, giới tính khác, mục tiêu khác...). Đưa đúng 2 lựa chọn ngắn gọn, rõ "
+            "ràng. TUYỆT ĐỐI KHÔNG nhắc lại/tóm tắt/liệt kê lại tên hay thông tin các gia sư đã "
+            "gợi ý ở lượt trước trong CÂU HỎI này (dù có trong lịch sử hội thoại) — chỉ hỏi đúng "
+            "2 lựa chọn, không giới thiệu gì thêm.",
+            history_contents, lang=lang)
+        return AgentResponse(
+            reply=r or _reopen_choice_fallback_reply(lang),
+            awaiting_confirmation=True, confirm_type="reopen_choice",
+            suggestions=_reopen_choice_suggestions(lang), context_patch=patch_fn())
+
+    # Thiếu môn HOẶC thiếu lớp → PH thật sự muốn tìm gia sư nhưng chưa đủ thông tin cốt lõi
+    # (filter CỨNG, không thể bỏ qua) → mở Mini App form (điền môn/lớp/ngân sách/khu vực...
+    # 1 lần, đầy đủ) thay vì hỏi từng câu qua chat — đúng thiết kế hybrid: chat chỉ dùng cho
+    # Q&A/hội thoại tự do, KHÔNG hỏi slot cốt lõi nữa (khác "Thiếu mục tiêu"/"lượt gộp tuỳ
+    # chọn" bên dưới — 2 slot MỀM đó vẫn hỏi qua chat sau khi Mini App đã cung cấp môn/lớp).
+    if ctx.subject_id is None or ctx.grade_level_id is None:
+        r = await _say(
+            note_prefix +
+            "Phụ huynh muốn tìm gia sư nhưng em CHƯA đủ thông tin (môn/lớp) để tìm chính xác. "
+            "Nói 1 câu ngắn, tự nhiên rằng em gửi 1 form nhanh để anh/chị điền thông tin (môn, "
+            "lớp, ngân sách, khu vực...) cho tiện và nhanh hơn, không cần hỏi từng câu qua chat. "
+            "TUYỆT ĐỐI KHÔNG chèn link, URL, hay placeholder kiểu [link]/[form]/[đường dẫn] "
+            "trong câu trả lời — nút bấm mở form sẽ được HỆ THỐNG tự gửi kèm NGAY SAU câu này, "
+            "bạn chỉ cần nói dẫn, không tự tạo link giả.",
+            history_contents, lang=lang)
+        return AgentResponse(
+            reply=r or "Dạ để em gửi form nhanh để anh/chị điền thông tin tìm gia sư cho tiện nhé ạ!",
+            reopen_mini_app=True, context_patch=patch_fn())
 
     # Thiếu mục tiêu → hỏi mục tiêu (1 câu, để tư vấn trúng thay vì bắn top-rating).
     # PH giục (rush) → bỏ qua, search luôn với slot hiện có (goal là câu hỏi mềm).
@@ -608,7 +752,7 @@ async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
             f"Đã biết cần gia sư {cur_subject_name or ''} lớp {cur_grade or ''}. Hỏi 1 câu ngắn "
             "về MỤC TIÊU học của bé để tư vấn trúng: bé cần mất gốc/củng cố lại, nâng cao, hay "
             "ôn thi (chuyển cấp/HSG/SAT...)? Chỉ hỏi mục tiêu, đừng hỏi lại môn/lớp.",
-            history_contents)
+            history_contents, lang=lang)
         return AgentResponse(reply=r or "Dạ bé nhà mình học với mục tiêu gì ạ (củng cố, nâng cao "
                              "hay ôn thi)?", context_patch=patch_fn())
 
@@ -625,7 +769,7 @@ async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
             f"tiêu {ctx.goal}). Trước khi tìm, hỏi GỘP trong 1 câu duy nhất: anh/chị muốn bé học "
             "online hay gia sư đến nhà, và có mong muốn gì thêm về gia sư không (cô hay thầy, "
             "kiên nhẫn, nghiêm khắc...). Chốt câu bằng ý: không có thì em tìm luôn ạ. KHÔNG hỏi "
-            "lại môn/lớp/mục tiêu.", history_contents)
+            "lại môn/lớp/mục tiêu.", history_contents, lang=lang)
         return AgentResponse(
             reply=r or "Dạ anh/chị muốn bé học online hay gia sư đến nhà ạ? Anh/chị có mong muốn "
             "gì thêm về gia sư không (cô hay thầy, kiên nhẫn...)? Không có thì em tìm luôn ạ!",
@@ -643,7 +787,7 @@ async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
             "đúng câu hỏi (theo nội dung ở trên), có thể chốt bằng 1 ý ngắn tự nhiên rằng nếu "
             "anh/chị muốn em tìm/lọc gia sư theo mục tiêu này thì cứ nói em. TUYỆT ĐỐI không "
             "giới thiệu lại danh sách gia sư, không nhắc lại tên các gia sư đã gợi ý.",
-            history_contents)
+            history_contents, lang=lang)
         return AgentResponse(
             reply=r or "Dạ anh/chị cần em tìm gia sư phù hợp cho mục tiêu này thì cứ nói em nhé ạ!",
             context_patch=patch_fn())
@@ -662,7 +806,7 @@ async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
             f"Đã tìm nhưng CHƯA có gia sư {cur_subject_name or ''} lớp {cur_grade or ''} phù hợp "
             "với nhu cầu của phụ huynh trong hệ thống. Nói thật điều này một cách lịch sự, và gợi "
             "ý anh/chị thử nới tiêu chí hoặc để lại thông tin, em cập nhật sau. TUYỆT ĐỐI không "
-            "bịa ra tên gia sư nào.", history_contents)
+            "bịa ra tên gia sư nào.", history_contents, lang=lang)
         return AgentResponse(
             reply=r or "Dạ hiện em chưa tìm được gia sư phù hợp với tiêu chí này ạ. Anh/chị thử "
             "nới tiêu chí giúp em nhé, hoặc em sẽ cập nhật khi có gia sư phù hợp ạ!",
@@ -678,13 +822,144 @@ async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
         f"({ctx.goal or 'học ' + (cur_subject_name or 'môn đã chọn')}"
         f"{'; ' + ctx.preferences if ctx.preferences else ''}). KHÔNG nói tổng số tìm "
         "được, KHÔNG liệt kê lại giá/đánh giá (đã có thẻ riêng bên dưới). Mời anh/chị xem thẻ chi tiết.",
-        history_contents)
+        history_contents, lang=lang)
     return AgentResponse(
         reply=r or "Dạ em tìm được vài gia sư phù hợp, anh/chị xem thẻ chi tiết bên dưới giúp em nhé ạ!",
         tutors=tutors, context_patch=patch_fn())
 
 
-async def _handle_faq(question: str, history_contents, patch) -> AgentResponse:
+_SAME_TUTOR_KEYWORDS = [
+    "đổi gia sư", "gia sư khác", "chưa ưng", "không ưng", "chưa phù hợp", "không phù hợp",
+    "muốn đổi", "tìm người khác", "gia sư mới",
+]
+_NEW_NEED_KEYWORDS = [
+    "môn khác", "khác môn", "lớp khác", "khác lớp", "giới tính khác", "khác giới tính",
+    "mục tiêu khác", "khác mục tiêu", "nhu cầu khác", "khác hẳn", "nhu cầu mới",
+]
+
+
+def _reopen_choice_suggestions(lang: str) -> list[str]:
+    """Nhãn 2 lựa chọn disambiguation — suggestions là field CẤU TRÚC (Python code set trực
+    tiếp, KHÔNG qua LLM diễn đạt) nên PHẢI tự dịch theo lang, không có _say() nào lo giúp.
+    Bug thật 2026-07-13: hardcode tiếng Việt khiến hội thoại tiếng Anh vẫn hiện nhãn Việt."""
+    if lang == "en":
+        return ["Different tutor, same criteria", "Different need"]
+    return ["Đổi gia sư khác", "Nhu cầu khác"]
+
+
+def _reopen_choice_fallback_reply(lang: str) -> str:
+    """Câu hỏi dự phòng khi _say() lỗi/rỗng — cũng phải tự dịch vì không qua LLM."""
+    if lang == "en":
+        return ("Would you like (1) a different tutor with the same criteria, or (2) a tutor "
+                "for a different need (subject/grade/gender...)?")
+    return ("Dạ anh/chị muốn (1) đổi gia sư khác với tiêu chí đang tìm, hay (2) tìm gia sư cho "
+            "nhu cầu khác (môn/lớp/giới tính khác...) ạ?")
+
+
+def _classify_reopen_choice(text: str) -> str | None:
+    """PH vừa trả lời câu hỏi 2-lựa-chọn (sendNumberedList = text thường, không phải nút bấm
+    thật) -> đoán "same" (đổi gia sư, giữ tiêu chí) hay "new" (nhu cầu khác hẳn) bằng từ khoá.
+    Không đoán được -> None, gọi nơi dùng hỏi lại thay vì rẽ nhánh bừa."""
+    t = text.strip().lower()
+    has_same = any(k in t for k in _SAME_TUTOR_KEYWORDS)
+    has_new = any(k in t for k in _NEW_NEED_KEYWORDS)
+    if has_same and not has_new:
+        return "same"
+    if has_new and not has_same:
+        return "new"
+    if t in ("1", "1.", "option 1"):
+        return "same"
+    if t in ("2", "2.", "option 2"):
+        return "new"
+    return None
+
+
+async def _handle_reopen_choice(ctx, message: str, history_contents, patch_fn, patch_out,
+                                lang: str = "vi") -> AgentResponse:
+    """Đọc câu trả lời của PH cho câu hỏi disambiguation vừa hỏi (xem _handle_find_tutor)."""
+    choice = _classify_reopen_choice(message)
+    if choice is None:
+        # Trả lời không rõ ý -> hỏi lại đúng 2 lựa chọn, KHÔNG đoán bừa (tránh tìm/mở form sai).
+        r = await _say(
+            "Phụ huynh trả lời không rõ đang chọn (1) đổi gia sư khác (giữ tiêu chí cũ) hay (2) "
+            "tìm gia sư cho nhu cầu khác hẳn. Hỏi lại NGẮN GỌN, lịch sự, nhắc lại đúng 2 lựa chọn "
+            "rõ ràng như lượt trước. TUYỆT ĐỐI KHÔNG nhắc lại/liệt kê lại tên hay thông tin các "
+            "gia sư đã gợi ý — chỉ hỏi đúng 2 lựa chọn.", history_contents, lang=lang)
+        return AgentResponse(
+            reply=r or _reopen_choice_fallback_reply(lang),
+            awaiting_confirmation=True, confirm_type="reopen_choice",
+            suggestions=_reopen_choice_suggestions(lang), context_patch=patch_fn())
+
+    patch_out["pending_reopen_choice"] = False
+
+    if choice == "new":
+        r = await _say(
+            "Phụ huynh muốn tìm gia sư cho NHU CẦU KHÁC (môn/lớp/giới tính/mục tiêu khác...). "
+            "Nói 1 câu ngắn, tự nhiên rằng em gửi lại form để anh/chị điền thông tin mới cho tiện. "
+            "TUYỆT ĐỐI KHÔNG chèn link, URL, hay placeholder kiểu [link]/[form]/[đường dẫn] trong "
+            "câu trả lời — nút bấm mở form sẽ được HỆ THỐNG tự gửi kèm NGAY SAU câu này.",
+            history_contents, lang=lang)
+        return AgentResponse(
+            reply=r or "Dạ em gửi lại form để anh/chị điền nhu cầu mới nhé ạ!",
+            reopen_mini_app=True, reopen_mini_app_fresh=True, context_patch=patch_fn())
+
+    # choice == "same": giữ nguyên môn/lớp, hỏi lý do/yêu cầu thêm trước khi tìm gia sư khác.
+    patch_out["refining_alternate_search"] = True
+    r = await _say(
+        "Phụ huynh muốn đổi sang gia sư KHÁC nhưng giữ nguyên môn/lớp đang tìm. Hỏi 1 câu ngắn, "
+        "lịch sự lý do chưa ưng ý gia sư trước đó và anh/chị có yêu cầu gì thêm không (vd giới "
+        "tính, phong cách dạy, kinh nghiệm...) để em tìm gia sư khác phù hợp hơn.",
+        history_contents, lang=lang)
+    return AgentResponse(
+        reply=r or "Dạ anh/chị chưa ưng gia sư trước ở điểm nào, và có yêu cầu gì thêm không để "
+        "em tìm gia sư khác phù hợp hơn ạ?", context_patch=patch_fn())
+
+
+async def _handle_alternate_search(ctx, cur_subject_name, cur_grade, message, history_contents,
+                                   allowed: dict, patch_fn, patch_out,
+                                   lang: str = "vi") -> AgentResponse:
+    """Lượt trả lời lý do/yêu cầu thêm sau khi PH chọn "đổi gia sư khác, giữ tiêu chí" (xem
+    _handle_reopen_choice). Tìm lại NGAY với môn/lớp cũ + yêu cầu mới, loại trừ gia sư đã gợi ý
+    (allowed) -- không hỏi thêm gì nữa, không gửi form."""
+    patch_out["refining_alternate_search"] = False
+    new_pref = message.strip()
+    if new_pref and "không có yêu cầu" not in new_pref.lower() and "không" != new_pref.lower():
+        old = ctx.preferences or ""
+        if new_pref.lower() not in old.lower():
+            merged = " ; ".join(x for x in [old, new_pref] if x)
+            ctx.preferences = merged
+            patch_out["preferences"] = merged
+
+    query = ", ".join(x for x in [
+        f"{cur_subject_name} lớp {cur_grade}" if cur_subject_name else None,
+        ctx.goal, ctx.preferences,
+    ] if x)
+    tutors, shown = await _run_search(ctx, query, exclude_ids=set(allowed.keys()))
+
+    if not tutors:
+        r = await _say(
+            f"Đã tìm nhưng CHƯA có gia sư {cur_subject_name or ''} lớp {cur_grade or ''} nào KHÁC "
+            "(ngoài những gia sư đã gợi ý trước) phù hợp trong hệ thống. Nói thật điều này lịch "
+            "sự, gợi ý anh/chị thử nới tiêu chí hoặc để lại thông tin, em cập nhật sau. TUYỆT ĐỐI "
+            "không bịa tên gia sư.", history_contents, lang=lang)
+        return AgentResponse(
+            reply=r or "Dạ hiện em chưa tìm được gia sư nào khác phù hợp ạ. Anh/chị thử nới tiêu "
+            "chí giúp em nhé, hoặc em sẽ cập nhật khi có gia sư phù hợp ạ!",
+            tutors=[], context_patch=patch_fn())
+
+    names_json = json.dumps(shown, ensure_ascii=False)
+    r = await _say(
+        "Đã tìm được gia sư KHÁC phù hợp hơn (đã loại các gia sư gợi ý trước đó). Giới thiệu "
+        f"NGẮN GỌN đúng những gia sư trong danh sách sau (chỉ dùng đúng các tên này, KHÔNG thêm "
+        f"ai khác, KHÔNG bịa): {names_json}. Mỗi người 1 dòng: tên + 1 lý do ngắn hợp với yêu cầu "
+        "vừa nêu. KHÔNG nói tổng số tìm được, KHÔNG liệt kê lại giá/đánh giá. Mời anh/chị xem thẻ "
+        "chi tiết.", history_contents, lang=lang)
+    return AgentResponse(
+        reply=r or "Dạ em tìm được gia sư khác phù hợp hơn, anh/chị xem thẻ chi tiết bên dưới "
+        "giúp em nhé ạ!", tutors=tutors, context_patch=patch_fn())
+
+
+async def _handle_faq(question: str, history_contents, patch, lang: str = "vi") -> AgentResponse:
     """RAG trên KB Tutora. Rỗng → câu an toàn, chống bịa tuyệt đối."""
     try:
         chunks, _ = await retrieve_chunks(
@@ -704,18 +979,18 @@ async def _handle_faq(question: str, history_contents, patch) -> AgentResponse:
     r = await _say(
         f"Phụ huynh hỏi: \"{question}\". Trả lời DỰA HOÀN TOÀN vào thông tin sau, KHÔNG bịa "
         f"thêm ngoài đây:\n{ctx_text}\nNếu thông tin trên KHÔNG trả lời được câu hỏi, nói thật là "
-        "phần này chưa có thông tin, mời anh/chị liên hệ hỗ trợ Tutora.", history_contents)
+        "phần này chưa có thông tin, mời anh/chị liên hệ hỗ trợ Tutora.", history_contents, lang=lang)
     return AgentResponse(reply=r or "Dạ anh/chị liên hệ hỗ trợ Tutora để được giải đáp giúp em nhé ạ!",
                          context_patch=patch)
 
 
 async def _handle_tutor_query(intent: str, tutor_ref: str | None, allowed: dict,
-                              history_contents, patch) -> AgentResponse:
+                              history_contents, patch, lang: str = "vi") -> AgentResponse:
     """Chi tiết / lịch 1 gia sư đã gợi ý. Chỉ cho phép gia sư trong danh sách đã shown."""
     if not allowed:
         r = await _say(
             "Phụ huynh hỏi chi tiết/lịch của một gia sư, nhưng em CHƯA gợi ý gia sư nào (chưa "
-            "search). Mời anh/chị cho biết nhu cầu để em tìm gia sư trước đã.", history_contents)
+            "search). Mời anh/chị cho biết nhu cầu để em tìm gia sư trước đã.", history_contents, lang=lang)
         return AgentResponse(reply=r or "Dạ để em tìm gia sư phù hợp trước, anh/chị cho em biết "
                              "cần môn gì, bé lớp mấy ạ?", context_patch=patch)
 
@@ -737,7 +1012,7 @@ async def _handle_tutor_query(intent: str, tutor_ref: str | None, allowed: dict,
             r = await _say(
                 "Phụ huynh hỏi chi tiết/lịch một gia sư nhưng chưa rõ đang hỏi ai trong số các "
                 "gia sư đã gợi ý. Hỏi lại lịch sự, ngắn gọn: anh/chị muốn xem gia sư nào ạ.",
-                history_contents)
+                history_contents, lang=lang)
             return AgentResponse(reply=r or "Dạ anh/chị muốn xem gia sư nào ạ?", context_patch=patch)
 
     if intent == "tutor_detail":
@@ -757,6 +1032,6 @@ async def _handle_tutor_query(intent: str, tutor_ref: str | None, allowed: dict,
     r = await _say(
         f"Phụ huynh hỏi {topic} của gia sư {tutor_name}. Diễn đạt lại NGẮN GỌN, tự nhiên cho phụ "
         f"huynh dựa trên dữ liệu sau (KHÔNG bịa ngoài đây, KHÔNG lộ id/trường kỹ thuật):\n{data_text}",
-        history_contents)
+        history_contents, lang=lang)
     return AgentResponse(
         reply=r or f"Dạ để em gửi anh/chị thông tin của {tutor_name} ạ.", context_patch=patch)

@@ -45,6 +45,7 @@ vấn ngoài phạm vi). Kiểm ở tầng CODE, không phó mặc prompt.
 | `tutor_detail` | Hỏi sâu 1 gia sư đã gợi ý | "chi tiết cô Thúy", "kinh nghiệm bạn ấy" | [KB-B](#kb-b-hỏi-chi-tiết-gia-sư) |
 | `availability` | Hỏi lịch rảnh / giá 1 gia sư | "cô ấy rảnh khi nào", "giá bao nhiêu" | [KB-B](#kb-b-hỏi-chi-tiết-gia-sư) |
 | `change_context` | Đổi môn / lớp / bé / mục tiêu | "đổi sang Hóa", "bé lớp khác" | [KB-C](#kb-c-đổi-ngữ-cảnh) |
+| `resend_form` | Nút/form Mini App lỗi, không bấm được, mất, hết hạn — cần gửi lại | "không bấm được nút", "gửi lại nút giúp em", "I can't click that button" | [KB-C-1](#kb-c-1-gửi-lại-nút-mini-app) |
 | `booking` | Muốn đặt lịch / đăng ký học | "đặt lịch cô ấy", "đăng ký học" | [KB-D](#kb-d-đặt-lịch-booking) |
 | `faq` | Hỏi về Tutora (chính sách, cách hoạt động, giá chung) | "Tutora hoàn tiền không", "học phí thế nào" | [KB-E](#kb-e-faq-về-tutora) |
 | `chitchat` | Chào hỏi / xác nhận ngắn / cảm thán / trêu / **gõ id kỹ thuật** | "alo", "ok", ":)))", "sao AI thế", "gia sư id tutor-550" | [KB-F](#kb-f-chitchat--ngoài-phạm-vi) |
@@ -208,35 +209,56 @@ lại, có gia sư phù hợp em báo ngay ạ!"
 
 🚫 TUYỆT ĐỐI không bịa gia sư để lấp khoảng trống kết quả rỗng.
 
-#### KB-A-2. PH từ chối gợi ý → hỏi lý do → gợi ý lại theo tier (vòng refine)
+#### KB-A-2. PH muốn tìm gia sư nữa sau khi đã SUGGESTED → hỏi rõ 2 trường hợp trước
 
-> User flow: *Accept? → No → AI ask reason → AI suggests top 3 matching tutors which are
+> Cập nhật 2026-07-13 (spec PO): trước đây bot tự đoán "chê gia sư = hỏi lý do rồi refine
+> ngay" ([Luồng cũ](#luồng-cũ-vẫn-áp-dụng-sau-khi-đã-chọn-nhánh-1) bên dưới). Log thật cho
+> thấy không phải lúc nào PH muốn tìm gia sư nữa cũng là "chê" — có thể là nhu cầu MỚI hẳn
+> (môn khác, giới tính khác, bé thứ 2...). Đoán nhầm → refine sai hướng hoặc mở form dư thừa.
+> **Nay bot PHẢI hỏi rõ trước khi quyết định**, không tự suy diễn.
+
+**Điều kiện vào:** state = SUGGESTED (đã có `shown_tutors`), intent = `find_tutor` (PH muốn
+tìm/xem gia sư nữa, bất kể lý do — "không ưng", "tìm thêm", "tìm gia sư khác"...) — route qua
+`find_tutor`, KHÔNG cần intent riêng; code phân biệt bằng `shown_tutors` không rỗng.
+
+**Luồng (2 lượt tối thiểu):**
+0. **Hỏi rõ 1 câu, đúng 2 lựa chọn** trước khi làm gì cả (state = CONFIRMING_REOPEN_CHOICE):
+   - **(1) Đổi gia sư khác, GIỮ NGUYÊN môn/lớp** đang tìm (PH chưa ưng gia sư đã gợi ý).
+   - **(2) Nhu cầu KHÁC hẳn** (môn khác, giới tính khác, mục tiêu khác, bé khác...).
+   PH trả lời không rõ ý (không khớp cả 2 từ khoá) → hỏi lại đúng 2 lựa chọn, KHÔNG đoán bừa.
+1. **Chọn (1)** → về [Luồng cũ](#luồng-cũ-vẫn-áp-dụng-sau-khi-đã-chọn-nhánh-1) bên dưới: hỏi
+   lý do/yêu cầu thêm rồi search lại NGAY trong chat, loại trừ các gia sư đã gợi ý
+   (`shown_tutors`) — **KHÔNG gửi form**.
+2. **Chọn (2)** → như KB-C (đổi ngữ cảnh): mở lại Mini App form (điền sẵn dữ liệu cũ) để PH
+   nhập nhu cầu mới — **KHÔNG hỏi thêm gì qua chat**, form đã đủ mọi trường.
+
+##### Luồng cũ (vẫn áp dụng SAU KHI đã chọn nhánh 1)
+
+> User flow gốc: *Accept? → No → AI ask reason → AI suggests top 3 matching tutors which are
 > related to the previous tier that user has chosen when they tap the tutor card (with
-> criteria from the reason)*.
+> criteria from the reason)*. Đoạn dưới đây mô tả phần "ask reason → suggest lại" — nay chỉ
+> chạy SAU bước 0 ở trên (đã biết chắc PH muốn đổi gia sư, giữ tiêu chí).
 
-**Điều kiện vào:** state = SUGGESTED, PH chê / từ chối gợi ý hiện tại ("không ưng", "có ai
-khác không", "cô này không hợp", "xem người khác đi") — route qua intent `find_tutor` (không
-cần intent mới; code phân biệt bằng state SUGGESTED + không có slot mới thay đổi).
-
-**Luồng:**
 1. **Hỏi LÝ DO đúng 1 câu** (state = REFINING): "Dạ anh/chị chưa ưng điểm nào để em tìm
    người hợp hơn ạ — về giá, kinh nghiệm, hay cách dạy ạ?" — KHÔNG hỏi lại slot cũ.
 2. LLM trích tiêu chí mới từ lý do (giá cao quá → `max_rate`; muốn cô → `tutor_gender`;
    thiếu kinh nghiệm → ưu tiên `completedHours`...) → nối vào `preferences`/filter.
-3. **Search lại GIỮ NGUYÊN tier PH đã quan tâm** — tier xác định bằng card PH đã bấm xem
-   (NestJS biết card nào được tap, gửi kèm state). Chưa tap card nào → search lại cả 3 tier
-   như KB-A bình thường.
+3. **Search lại, loại trừ các gia sư đã gợi ý** (`shown_tutors`) — tránh trả lại đúng người
+   cũ. _(Chưa làm: giữ nguyên tier PH đã quan tâm — xem "Đối chiếu" bên dưới, hiện search lại
+   cả 3 tier như KB-A bình thường, tier cũ PH đã tap card CHƯA được track/truyền sang.)_
 4. Kết quả → về SUGGESTED (card mới) hoặc KB-A-1 nếu rỗng.
 
 **Chống lặp vô hạn:** tối đa **2 vòng refine liên tiếp**. Sau 2 vòng PH vẫn từ chối →
 KHÔNG hỏi lý do lần 3; gợi ý: (a) vào waitlist chờ gia sư mới, hoặc (b) nhắn hỗ trợ Tutora
 (người thật) tư vấn kỹ hơn. _(Tương đương handoff classifier của Kodee — biết lúc nào bot
-nên dừng.)_
+nên dừng.)_ ⚠️ **Chưa implement trong code** — hiện mỗi vòng "đổi gia sư khác" đều hỏi lại từ
+bước 0, không đếm số vòng liên tiếp; xem "Đối chiếu" bên dưới.
 
 **Câu mẫu:**
 | Bước | Ví dụ |
 |---|---|
-| Hỏi lý do | "Dạ anh/chị chưa ưng điểm nào ạ — về học phí, kinh nghiệm hay cách dạy — để em tìm người hợp hơn cho bé ạ?" |
+| Hỏi rõ 2 trường hợp (bước 0, MỚI) | "Dạ anh/chị muốn (1) đổi gia sư khác với tiêu chí đang tìm, hay (2) tìm gia sư cho nhu cầu khác (môn/lớp/giới tính khác...) ạ?" |
+| Hỏi lý do (sau khi chọn 1) | "Dạ anh/chị chưa ưng điểm nào ạ — về học phí, kinh nghiệm hay cách dạy — để em tìm người hợp hơn cho bé ạ?" |
 | Giới thiệu lại sau refine | "Dạ vậy em gửi thêm cô Phạm Mai Anh — học phí nhẹ hơn mà vẫn chuyên ôn thi lớp 9, anh/chị xem thử giúp em nhé!" |
 | Sau 2 vòng vẫn từ chối | "Dạ để em ghi nhận nhu cầu của mình, khi có gia sư mới phù hợp em báo anh/chị ngay ạ. Hoặc anh/chị nhắn hỗ trợ Tutora để được tư vấn kỹ hơn nhé!" |
 
@@ -245,6 +267,10 @@ nên dừng.)_
 - 🚫 Tiêu chí mới trích từ lý do phải áp vào SEARCH THẬT — không được "giả vờ đã lọc" rồi
   đưa lại danh sách cũ đảo thứ tự.
 - 🚫 KHÔNG reset slot gốc (subject/grade/goal) trong vòng refine — lý do chỉ THÊM tiêu chí.
+- 🚫 KHÔNG tự ý search lại HAY mở form ngay khi PH nói muốn tìm gia sư nữa — PHẢI hỏi rõ bước
+  0 trước, trừ khi PH đã tự nêu rõ trong CHÍNH câu đó (vd "cho tôi gia sư môn khác" đã đủ rõ
+  là nhu cầu khác → route thẳng KB-C, không hỏi lại — _lưu ý: nhánh này chưa tách riêng trong
+  code, hiện luôn hỏi bước 0 kể cả khi câu đã đủ rõ; xem "Đối chiếu"_).
 
 ---
 
@@ -278,8 +304,21 @@ nên dừng.)_
   "hỏi 1 lần, mềm" (đúng KB-A bước 4): đủ 3 slot cứng → hỏi gộp tuỳ chọn đúng 1 lượt →
   search dù PH có trả lời hay không. Test cũ giữ nguyên assertion (giờ pass tự nhiên),
   docstring đã cập nhật + thêm test cho nhánh từ chối lượt gộp và nhánh đã-hỏi-rồi.
-- Vòng refine KB-A-2 (hỏi lý do + giữ tier) hoàn toàn CHƯA có trong code — hiện PH chê thì
-  extract rơi vào `find_tutor` và search lại y hệt tiêu chí cũ (trả đúng người cũ).
+- ✅ **KB-A-2 bước 0 (hỏi rõ 2 trường hợp) ĐÃ CÓ trong code** —
+  `app/services/agent.py::_handle_find_tutor` (gate đầu hàm, trước gate thiếu môn/lớp): PH
+  muốn tìm gia sư nữa VÀ `shown_tutors` không rỗng → luôn hỏi trước qua 2 field state mới
+  `pending_reopen_choice`/`refining_alternate_search` (`TutorChatContext`/`AgentContextPatch`,
+  `schemas.py`) — `run_agent` đọc 2 field này ƯU TIÊN trước mọi intent khác (lượt trả lời cho
+  câu hỏi bước 0 dễ bị extract đoán nhầm intent). Phân loại câu trả lời (1)/(2) bằng từ khoá
+  (`_classify_reopen_choice`) — CHƯA dùng LLM, không rõ ý → hỏi lại chứ không đoán bừa.
+  ⚠️ **Gap đã biết** (chưa fix, xem guardrail cuối KB-A-2): (a) chưa route thẳng KB-C khi PH
+  đã nêu rõ nhu cầu khác NGAY trong câu đầu — luôn hỏi bước 0; (b) chưa đếm số vòng refine
+  liên tiếp (giới hạn "tối đa 2 vòng" chưa implement); (c) refine (nhánh 1) chưa giữ tier PH
+  đã quan tâm — search lại cả 3 tier, chỉ loại trừ đúng gia sư đã gợi ý qua
+  `_run_search(..., exclude_ids=...)` (lọc phía client, `.NET /recommend` không hỗ trợ exclude
+  sẵn). NestJS (`tutora-zalo-bot`): Mini App form submit (`mini-app-search.flow.ts`) PHẢI
+  truyền `shownTutorsOverride=[]` cho `AgentMatchingFlow.runTurn` — nếu không, `shown_tutors`
+  cũ còn sót sẽ khiến agent hỏi lại bước 0 ngay sau khi PH VỪA quyết định qua form.
 - ✅ Bug KB-B đã fix trong code: tên không khớp + nhiều gia sư đã gợi ý → HỎI LẠI
   (`_handle_tutor_query`); chỉ auto-chọn khi đúng 1 người. Tin nhắn chứa id kỹ thuật
   (tutor-xxx/uuid) cũng đã chặn ở tầng code TRƯỚC khi gọi LLM → đáp như chitchat.
@@ -326,6 +365,31 @@ NỘI BỘ từ tên đã khớp ở `shown_tutors` — user KHÔNG bao giờ cu
 **Nút gợi ý:** ["Đúng rồi", "Không, giữ như cũ"]
 
 **Guardrail:** 🚫 KHÔNG tự đổi slot khi chưa xác nhận (tránh tìm nhầm khi user lỡ tay).
+
+---
+
+#### KB-C-1. Gửi lại nút Mini App
+
+> Bug thật 2026-07-13: PH ở 1/5 máy test không bấm được nút (Mini App đang chạy bản
+> DEVELOPMENT, máy đó chưa được thêm vào Testing members trên Zalo Developer Console — lỗi
+> hạ tầng/cấu hình, KHÔNG phải bug agent). PH báo lỗi + xin gửi lại nút, nhưng agent lúc đó
+> CHƯA có nhánh xử lý — rơi vào `chitchat`/`faq`, chỉ hỏi lại môn/lớp qua chat ("there isn't
+> a clickable button in our chat here") dù PH không thiếu thông tin, nút mới là thứ lỗi.
+
+**Điều kiện vào:** intent = `resend_form` — PH nói nút/form Mini App không bấm được, lỗi,
+không hiện, mất, hết hạn, hoặc xin gửi lại (không phân biệt lý do kỹ thuật thật hay hết hạn
+token TTL 30 phút).
+
+**Luồng:** Gửi lại NGUYÊN nút Mini App (giống KB-C) với dữ liệu hiện có, **KHÔNG hỏi lại**
+môn/lớp/thông tin gì qua chat — PH không thiếu thông tin, chỉ nút bị lỗi.
+
+**Câu mẫu:** "Dạ em xin lỗi vì sự bất tiện, em gửi lại nút ngay đây ạ!"
+
+**Guardrail:**
+- 🚫 KHÔNG hỏi lại slot đã biết qua chat để "thay thế" nút — PH đang xin đúng NÚT, không phải
+  đổi cách nhập liệu.
+- 🚫 KHÔNG tự nhận "không có nút nào trong chat này" — nút vẫn tồn tại (chỉ lỗi bấm/hết hạn/
+  chưa được cấp quyền test), gửi lại là xử lý đúng, không phủ nhận.
 
 ---
 

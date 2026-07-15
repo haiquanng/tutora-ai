@@ -9,6 +9,7 @@ Luồng (AI stateless — bên gọi giữ history, gửi kèm mỗi request):
   3. Ghép { reply, tutors, filters, ai_ranked }.
 """
 import json
+import re
 import httpx
 from google import genai
 from google.genai import types
@@ -121,6 +122,31 @@ async def _extract(
         return {"reply": "", "filters": {}}
 
 
+# ── Chuẩn hoá tên tỉnh/thành trước khi gửi .NET ──
+# .NET so khớp TUYỆT ĐỐI (Teachingareacity == city, xem TutorSearchRepository.cs) nhưng
+# profile gia sư lưu tên NGẮN/không chuẩn ("TP.HCM", "Hà Nội", "Biên Hòa"...), trong khi
+# Mini App form + provinces.open-api.vn trả tên DÀI chính thức ("Thành phố Hồ Chí Minh",
+# "Tỉnh Bình Dương"...) — không bao giờ khớp tuyệt đối nếu không chuẩn hoá (bug thật phát
+# hiện 2026-07-13: chọn khu vực trong wizard luôn trả 0 gia sư). Chuẩn hoá ở tầng AI này
+# (không sửa UI wizard) theo đúng hướng đã thống nhất: bóc "Thành phố "/"Tỉnh " + alias
+# riêng cho case viết tắt không theo quy luật (TP.HCM).
+_CITY_PREFIX_RE = re.compile(r"^(Thành phố|Tỉnh)\s+", re.IGNORECASE)
+_CITY_ALIASES = {
+    "hồ chí minh": "TP.HCM",
+    "sài gòn": "TP.HCM",
+    "hcm": "TP.HCM",
+    "tp hcm": "TP.HCM",
+    "tp.hcm": "TP.HCM",
+}
+
+
+def _normalize_city(city: str | None) -> str | None:
+    if not city:
+        return city
+    stripped = _CITY_PREFIX_RE.sub("", city).strip()
+    return _CITY_ALIASES.get(stripped.lower(), stripped)
+
+
 async def _fetch_candidates(context, filters: TutorChatFilters, query: str) -> dict:
     """Gọi .NET recommend (POST /api/tutors/recommend) — filter SQL + profile + rerank.
     subject_id từ filter (tích luỹ/đổi môn) ưu tiên hơn subject_id của wizard."""
@@ -130,9 +156,10 @@ async def _fetch_candidates(context, filters: TutorChatFilters, query: str) -> d
         "subjectId": filters.subject_id or context.subject_id,
         "gradeLevelId": context.grade_level_id,
         "teachingMode": context.teaching_mode,
-        "city": context.city,
+        "city": _normalize_city(context.city),
         "minRate": filters.min_rate,
         "maxRate": filters.max_rate,
+        "gender": filters.tutor_gender or context.tutor_gender,
         "query": query or None,
         "topK": top_k,
     }
