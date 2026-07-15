@@ -1,62 +1,65 @@
-"""Kịch bản search theo gate "HỎI 1 LẦN, MỀM" (agents/agentscenarios.md KB-A bước 4).
+"""Kịch bản search — thiết kế "LUÔN mở Mini App form" (quyết định sản phẩm 2026-07-15).
 
-Bắt buộc cứng: subject + grade + goal. Sau đó agent hỏi GỘP đúng 1 lượt tuỳ chọn
-(hình thức học + mong muốn về gia sư) rồi search — PH không có yêu cầu ("sao cũng
-được") thì vẫn search, KHÔNG hỏi lại lần 2. PH giục → search ngay, bỏ câu hỏi mềm."""
+Mọi lượt PH thể hiện ý định tìm gia sư mà CHƯA từng được gợi ý gia sư nào trong phiên
+(shown_tutors rỗng) đều mở lại Mini App form (reopen_mini_app=True), bất kể context đã
+có sẵn môn/lớp/mục tiêu/mong muốn hay chưa — không còn hỏi-gộp/slot-filling qua chat nữa.
+CHỈ ngoại lệ: message là đúng trigger cố định từ chính Mini App form submit
+(MiniAppSearchFlow.handleFormSubmit bên tutora-zalo-bot) — lúc đó search THẲNG, không
+mở lại form (tránh vòng lặp vô hạn submit -> form -> submit...)."""
 import pytest
 
 pytestmark = pytest.mark.agent
 
 
-def test_moi_co_mon_lop_thi_hoi_them_khong_ban_card(agent):
-    """Đủ 3 slot cứng nhưng CHƯA hỏi lượt gộp tuỳ chọn -> hỏi 1 câu (mong muốn thêm),
-    CHƯA recommend lượt này. Lượt sau mới search dù PH có trả lời hay không."""
+def test_fresh_intent_luon_mo_form_du_da_co_du_slot(agent):
+    """Câu đầu tiên dù đã nói đủ môn/lớp/mục tiêu -> vẫn mở Mini App form, KHÔNG search
+    thẳng qua chat (thay thế hành vi "hỏi lượt gộp" cũ)."""
     r = agent("tìm gia sư Toán lớp 8 ôn thi cho con em")
-    assert len(r["tutors"]) == 0, "phải hỏi lượt gộp tuỳ chọn 1 lần trước khi bắn card"
+    assert len(r["tutors"]) == 0, "phải mở Mini App form, không search thẳng từ chat"
     assert r["reply"] != ""
-    # Agent phải đánh dấu đã hỏi (NestJS persist) để lượt sau không hỏi lại.
-    assert (r.get("context_patch") or {}).get("asked_preferences") is True
+    assert r.get("reopen_mini_app") is True
 
 
 def test_thieu_thong_tin_hoi_lai(agent):
-    """Chỉ có môn, thiếu mọi thứ khác -> phải hỏi thêm, KHÔNG search."""
+    """Chỉ có môn, thiếu mọi thứ khác -> mở Mini App form, KHÔNG search."""
     r = agent("em cần tìm gia sư dạy Tiếng Anh")
     assert len(r["tutors"]) == 0
     assert r["reply"] != ""
+    assert r.get("reopen_mini_app") is True
 
 
-def test_tu_choi_luot_gop_van_recommend(agent):
-    """PH trả lời 'sao cũng được' cho lượt gộp tuỳ chọn -> VẪN search, không hỏi lại lần 2."""
+def test_tiep_tuc_hoi_thoai_van_mo_form_chua_search(agent):
+    """PH trả lời tiếp câu hỏi cũ (trước khi có thiết kế mới) giữa chat, CHƯA từng được
+    gợi ý gia sư nào -> vẫn mở lại Mini App form, KHÔNG tự search thẳng qua chat."""
     history = [
         {"role": "user", "content": "tìm gia sư Toán lớp 8 ôn thi cho con em"},
-        {"role": "assistant", "content": "Dạ anh/chị muốn bé học online hay gia sư đến nhà ạ? "
-         "Có mong muốn gì thêm về gia sư không? Không có thì em tìm luôn ạ!"},
+        {"role": "assistant", "content": "Dạ để em gửi form nhanh để anh/chị điền thông tin cho tiện nhé ạ!"},
     ]
-    r = agent("sao cũng được em ơi", history=history,
+    r = agent("anh/chị chưa điền form được, em tìm gia sư giúp qua đây luôn nhé", history=history,
               context={"subject_id": 1, "grade_level_id": 56, "goal": "ôn thi"})
-    assert len(r["tutors"]) > 0, "PH đã từ chối lượt gộp mà vẫn không search (hỏi lặp?)"
+    assert len(r["tutors"]) == 0, "chưa search lần nào mà lại tự search thẳng qua chat"
+    assert r.get("reopen_mini_app") is True
 
 
-def test_da_hoi_luot_gop_khong_hoi_lai(agent):
-    """asked_preferences=True (NestJS persist từ lượt trước) -> đủ 3 slot là search luôn."""
+def test_asked_preferences_cu_khong_con_tac_dung_neu_chua_search(agent):
+    """asked_preferences=True còn sót lại từ thiết kế cũ, nhưng CHƯA search lần nào
+    (shown_tutors rỗng) -> vẫn mở Mini App form theo thiết kế mới, không search thẳng."""
     r = agent("bé cần củng cố kiến thức",
               history=[{"role": "user", "content": "tìm gia sư Toán lớp 8"},
                        {"role": "assistant", "content": "Dạ bé học với mục tiêu gì ạ?"}],
               context={"subject_id": 1, "grade_level_id": 56, "asked_preferences": True})
-    assert len(r["tutors"]) > 0, "đã hỏi lượt gộp rồi mà vẫn chưa search"
+    assert len(r["tutors"]) == 0
+    assert r.get("reopen_mini_app") is True
 
 
-def test_du_nhu_cau_thi_recommend(agent):
-    """Hội thoại đã thu thập đủ mục tiêu + tình trạng + mong muốn -> ĐƯỢC recommend."""
-    history = [
-        {"role": "user", "content": "tìm gia sư Toán cho bé lớp 8"},
-        {"role": "assistant", "content": "Dạ mục tiêu học của bé là gì ạ?"},
-        {"role": "user", "content": "bé mất gốc từ lớp 7, tiếp thu chậm"},
-        {"role": "assistant", "content": "Dạ anh/chị mong muốn gia sư thế nào ạ?"},
-    ]
-    r = agent("cần cô kiên nhẫn dạy chậm dễ hiểu, học online",
-              history=history, context={"subject_id": 1, "grade_level_id": 56})
-    assert len(r["tutors"]) > 0, "đã đủ nhu cầu mà vẫn không recommend"
+def test_mini_app_submit_trigger_search_thang_khong_mo_lai_form(agent):
+    """Trigger message cố định từ Mini App form submit -> search THẲNG, KHÔNG mở lại
+    form (đây là ngoại lệ DUY NHẤT của "luôn mở form" — tránh vòng lặp vô hạn)."""
+    r = agent("Tìm gia sư giúp tôi ạ",
+              context={"subject_id": 1, "grade_level_id": 56, "goal": "ôn thi",
+                       "asked_preferences": True})
+    assert r.get("reopen_mini_app") is not True, "submit từ Mini App mà vẫn mở lại form"
+    assert len(r["tutors"]) > 0, "submit từ Mini App phải search thẳng, không hỏi gì thêm"
     assert all("Toán" in "".join(t.get("subjects") or []) for t in r["tutors"])
 
 
