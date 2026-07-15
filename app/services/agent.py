@@ -684,6 +684,16 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
                                     rush=ex["rush"], knowledge_note=ex["knowledge_note"], lang=lang)
 
 
+_MINI_APP_SUBMIT_TRIGGERS = {"Tìm gia sư giúp tôi ạ", "Please find a tutor for me."}
+
+
+def _is_mini_app_submission(message: str) -> bool:
+    """True khi tin nhắn này là callback từ Mini App form submit (xem tutora-zalo-bot
+    MiniAppSearchFlow.handleFormSubmit) — trigger message CỐ ĐỊNH, không phải PH gõ tay.
+    Case này agent phải search THẲNG, không được mở lại form (PH vừa điền xong)."""
+    return message.strip() in _MINI_APP_SUBMIT_TRIGGERS
+
+
 async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
                              message, history_contents, allowed, patch_fn, patch_out,
                              rush: bool = False, knowledge_note: str | None = None,
@@ -725,17 +735,20 @@ async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
             awaiting_confirmation=True, confirm_type="reopen_choice",
             suggestions=_reopen_choice_suggestions(lang), context_patch=patch_fn())
 
-    # Thiếu môn HOẶC thiếu lớp → PH thật sự muốn tìm gia sư nhưng chưa đủ thông tin cốt lõi
-    # (filter CỨNG, không thể bỏ qua) → mở Mini App form (điền môn/lớp/ngân sách/khu vực...
-    # 1 lần, đầy đủ) thay vì hỏi từng câu qua chat — đúng thiết kế hybrid: chat chỉ dùng cho
-    # Q&A/hội thoại tự do, KHÔNG hỏi slot cốt lõi nữa (khác "Thiếu mục tiêu"/"lượt gộp tuỳ
-    # chọn" bên dưới — 2 slot MỀM đó vẫn hỏi qua chat sau khi Mini App đã cung cấp môn/lớp).
-    if ctx.subject_id is None or ctx.grade_level_id is None:
+    # LUÔN mở Mini App form khi PH thật sự muốn tìm gia sư (fresh find_tutor intent, chưa
+    # từng được gợi ý gia sư nào trong phiên này — allowed rỗng), BẤT KỂ đã có sẵn môn/lớp
+    # trong context hay chưa (quyết định sản phẩm 2026-07-15: mọi ý định tìm gia sư đều đi
+    # qua Mini App form thay vì agent tự search thẳng từ 1 câu chat, kể cả khi câu đó đã đủ
+    # thông tin) — CHỈ trừ đúng 1 case: chính Mini App form vừa submit xong gọi lại đây
+    # (_is_mini_app_submission qua trigger message cố định), lúc đó PH VỪA điền form nên
+    # phải search thẳng, không được mở lại form nữa (tránh lặp vô hạn submit -> mở form ->
+    # submit -> ...).
+    if not allowed and not _is_mini_app_submission(message):
         r = await _say(
             note_prefix +
-            "Phụ huynh muốn tìm gia sư nhưng em CHƯA đủ thông tin (môn/lớp) để tìm chính xác. "
-            "Nói 1 câu ngắn, tự nhiên rằng em gửi 1 form nhanh để anh/chị điền thông tin (môn, "
-            "lớp, ngân sách, khu vực...) cho tiện và nhanh hơn, không cần hỏi từng câu qua chat. "
+            "Phụ huynh muốn tìm gia sư. Nói 1 câu ngắn, tự nhiên rằng em gửi 1 form nhanh để "
+            "anh/chị điền/xác nhận thông tin (môn, lớp, ngân sách, khu vực...) cho tiện và "
+            "nhanh hơn, không cần hỏi từng câu qua chat. "
             "TUYỆT ĐỐI KHÔNG chèn link, URL, hay placeholder kiểu [link]/[form]/[đường dẫn] "
             "trong câu trả lời — nút bấm mở form sẽ được HỆ THỐNG tự gửi kèm NGAY SAU câu này, "
             "bạn chỉ cần nói dẫn, không tự tạo link giả.",
