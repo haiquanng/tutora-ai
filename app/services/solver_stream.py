@@ -67,9 +67,11 @@ async def solve_stream(
 
     await thread_future
 
+    rag_used = bool(rag_chunks) or bool(bank_matches)
     yield {
         "id": message_id,
         "session_id": session_id,
         "delta": "",
         "done": True,
+        "rag_used": rag_used,
     }
