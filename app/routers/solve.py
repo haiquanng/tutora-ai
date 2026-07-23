@@ -34,13 +34,18 @@ def _sse_reply(message_id: str, session_id: str, text: str) -> str:
     return out
 
 
-async def _resolve_problem_text(body: SolveRequest, gemini) -> str:
-    """Lấy đề bài từ text/ảnh. Trả NO_MATH nếu ảnh không đọc được đề."""
+async def _resolve_problem_text(body: SolveRequest, gemini) -> tuple[str, bool]:
+    """Lấy đề bài từ text/ảnh. Trả (text, from_image).
+
+    from_image=True khi đề đến từ ẢNH (OCR): học sinh chụp đề để NHỜ GIẢI -> chắc chắn
+    là bài toán. Dùng để BỎ QUA gate is_problem của classifier (classifier chạy trên
+    text OCR hay phân loại nhầm bài VDC/trắc nghiệm thành "không phải bài toán" ->
+    rơi vào CHAT_SYSTEM: giải đúng nhưng MẤT thinking + code + cấu trúc bước)."""
     if body.image_url:
-        return await ocr.extract_from_url(gemini, body.image_url)
+        return await ocr.extract_from_url(gemini, body.image_url), True
     if body.image_base64:
-        return await ocr.extract_from_image(gemini, body.image_base64)
-    return body.text or ""
+        return await ocr.extract_from_image(gemini, body.image_base64), True
+    return body.text or "", False
 
 
 async def _sse_generator(
@@ -55,7 +60,7 @@ async def _sse_generator(
 ) -> AsyncGenerator[str, None]:
     try:
         # OCR nằm trong generator để mọi lỗi ảnh cũng thành SSE (mobile parse đồng nhất).
-        problem_text = await _resolve_problem_text(body, gemini)
+        problem_text, from_image = await _resolve_problem_text(body, gemini)
         if problem_text == ocr.NO_MATH:
             yield _sse_reply(message_id, session_id, _NO_MATH_REPLY)
             return
@@ -63,7 +68,7 @@ async def _sse_generator(
         grade, chapter = body.grade, body.chapter
         clf = await classifier.classify_problem(gemini, problem_text)
         is_math_related = clf.get("is_math_related", True)
-        is_problem = clf.get("is_problem", True)
+        is_problem = True if from_image else clf.get("is_problem", True)
         grade = grade or clf.get("grade")
         chapter = chapter or clf.get("chapter")
 
@@ -90,6 +95,7 @@ async def _sse_generator(
             history=history,
             is_problem=is_problem,
             bank_matches=bank_matches,
+            response_format=body.response_format,
         ):
             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 

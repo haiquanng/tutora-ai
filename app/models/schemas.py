@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import Optional, List, Any, Dict
+from pydantic import BaseModel, field_validator
+from typing import Optional, List, Any, Dict, Literal
 
 class HistoryMessage(BaseModel):
     role: str   # "user" | "assistant"
@@ -180,6 +180,12 @@ class SolveRequest(BaseModel):
     message_id: Optional[str] = None
     chat_id: Optional[str] = None
     history: List[HistoryMessage] = []
+    response_format: Optional[Literal["markdown", "steps"]] = "markdown"
+
+    @field_validator("response_format", mode="before")
+    @classmethod
+    def _default_response_format(cls, v):
+        return v or "markdown"
 
 class TutorRecommendRequest(BaseModel):
     query: Optional[str] = None
@@ -207,8 +213,13 @@ class TutorRecommendResponse(BaseModel):
 class StreamChunk(BaseModel):
     id: str
     session_id: str
-    delta: str
-    done: bool
+    delta: str = ""
+    done: bool = False
+    thinking: Optional[str] = None
+    rag_used: Optional[bool] = None
+    # response_format="steps": các bước đã cấu trúc cho canvas (xem step_segmenter).
+    steps: Optional[List[Dict[str, Any]]] = None
+    steps_final: Optional[List[Dict[str, Any]]] = None
 
 class Step(BaseModel):
     step: int

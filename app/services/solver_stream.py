@@ -2,7 +2,134 @@ import asyncio
 from typing import Optional, List, AsyncGenerator
 from google import genai
 from google.genai import types
-from ..utils.prompt import TUTOR_SYSTEM_V2, CHAT_SYSTEM, build_solve_prompt_v2
+from ..utils.prompt import TUTOR_SYSTEM_V2, CHAT_SYSTEM, THINKING_SYSTEM, build_solve_prompt_v2
+from .step_segmenter import segment_steps
+
+_THINK_OPEN = "【SUY NGHĨ】"
+_THINK_CLOSE = "【HẾT SUY NGHĨ】"
+_ANSWER_MARK = "**Đáp án"
+
+
+def _prefix_overlap(buf: str, markers: tuple[str, ...]) -> int:
+    """Độ dài đuôi `buf` trùng ĐẦU của BẤT KỲ marker nào (giữ lại phòng thẻ cắt ngang chunk).
+    Giữ đúng phần có thể là mảnh thẻ, còn lại phát ngay -> không trễ."""
+    best = 0
+    for marker in markers:
+        max_len = min(len(buf), len(marker) - 1)
+        for n in range(max_len, best, -1):
+            if marker.startswith(buf[-n:]):
+                best = n
+                break
+    return best
+
+
+class _ThinkingSplitter:
+    """
+    Tách luồng text stream thành 2 mạch: 'thinking' (trong 【SUY NGHĨ】...【HẾT SUY NGHĨ】)
+    và 'answer' (lời giải). Xử lý ONLINE từng chunk, chịu được thẻ cắt ngang giữa 2 chunk,
+    và chịu được model QUÊN thẻ đóng (đóng dự phòng bằng "**Đáp án").
+
+    feed(text) -> list[(kind, piece)] với kind ∈ {"thinking","answer"}.
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._in_thinking = False
+
+    def _find_first(self, markers: tuple[str, ...]) -> tuple[int, str]:
+        """Vị trí SỚM NHẤT trong buf khớp bất kỳ marker; (-1, '') nếu không có."""
+        best_idx, best_marker = -1, ""
+        for m in markers:
+            i = self._buf.find(m)
+            if i != -1 and (best_idx == -1 or i < best_idx):
+                best_idx, best_marker = i, m
+        return best_idx, best_marker
+
+    def feed(self, text: str) -> list[tuple[str, str]]:
+        self._buf += text
+        out: list[tuple[str, str]] = []
+
+        while True:
+            if self._in_thinking:
+                # Đóng bằng thẻ đóng HOẶC mốc lời giải (phòng model quên thẻ đóng).
+                idx, marker = self._find_first((_THINK_CLOSE, _ANSWER_MARK))
+                if idx == -1:
+                    break
+                before = self._buf[:idx]
+                if before:
+                    out.append(("thinking", before))
+                # Nếu đóng bằng mốc lời giải thì GIỮ LẠI mốc (nó thuộc answer);
+                # nếu đóng bằng thẻ 【HẾT】 thì nuốt thẻ đi.
+                consume = len(marker) if marker == _THINK_CLOSE else 0
+                self._buf = self._buf[idx + consume:]
+                self._in_thinking = False
+            else:
+                idx = self._buf.find(_THINK_OPEN)
+                if idx == -1:
+                    break
+                before = self._buf[:idx]
+                if before:
+                    out.append(("answer", before))
+                self._buf = self._buf[idx + len(_THINK_OPEN):]
+                self._in_thinking = True
+
+        # Giữ đuôi nếu có thể là đầu của thẻ đang chờ (thẻ/mốc cắt ngang chunk).
+        pending = (_THINK_CLOSE, _ANSWER_MARK) if self._in_thinking else (_THINK_OPEN,)
+        hold = _prefix_overlap(self._buf, pending)
+        if hold < len(self._buf):
+            piece = self._buf[: len(self._buf) - hold]
+            self._buf = self._buf[len(self._buf) - hold :]
+            out.append(("thinking" if self._in_thinking else "answer", piece))
+        return out
+
+    def flush(self) -> list[tuple[str, str]]:
+        """Cuối stream: phát nốt phần còn giữ trong buffer."""
+        if not self._buf:
+            return []
+        piece, self._buf = self._buf, ""
+        return [("thinking" if self._in_thinking else "answer", piece)]
+
+
+def _classify_part(part) -> tuple[str, str]:
+    """
+    Phân loại 1 part trong stream -> (kind, text).
+
+    kind:
+      "delta"     -> văn bản model (gồm cả <thinking>, tách ở bước sau)
+      "code"      -> Gemini tự sinh Python kiểm tra đáp số
+      "code_ok"   -> code chạy XONG không lỗi -> tín hiệu để suy ra verified
+      "code_err"  -> code chạy LỖI -> tín hiệu verified=false
+      ""          -> part rỗng/không liên quan, bỏ qua
+    """
+    # Kết quả chạy code: OUTCOME_OK => tính lại chạy trơn; ngược lại là lỗi/khác.
+    result = getattr(part, "code_execution_result", None)
+    if result is not None:
+        outcome = getattr(result, "outcome", None)
+        ok = outcome is None or "OK" in str(outcome).upper()
+        return ("code_ok" if ok else "code_err", getattr(result, "output", "") or "")
+
+    exec_code = getattr(part, "executable_code", None)
+    if exec_code is not None:
+        return ("code", getattr(exec_code, "code", "") or "")
+
+    text = getattr(part, "text", None) or ""
+    return ("delta", text) if text else ("", "")
+
+
+def _iter_parts(chunk):
+    """
+    Lấy list part từ 1 chunk stream, chịu được cả shape thật của google-genai
+    lẫn fake test (chỉ có .text). Trả list[(kind, text)].
+    """
+    candidates = getattr(chunk, "candidates", None)
+    if candidates:
+        content = getattr(candidates[0], "content", None)
+        parts = getattr(content, "parts", None) if content else None
+        if parts:
+            return [_classify_part(p) for p in parts]
+    # Fallback: chunk kiểu cũ chỉ phơi .text (bao gồm fake trong test).
+    text = getattr(chunk, "text", None) or ""
+    return [("delta", text)] if text else []
 
 
 async def solve_stream(
@@ -14,12 +141,18 @@ async def solve_stream(
     history: Optional[List[dict]] = None,
     is_problem: bool = True,
     bank_matches: Optional[List[dict]] = None,
+    response_format: str = "markdown",
 ) -> AsyncGenerator[dict, None]:
-    """Stream text tự nhiên theo phong cách gia sư, không JSON."""
-    contents = []
+    """
+    Stream text tự nhiên theo phong cách gia sư, không JSON.
+
+    response_format="steps": vẫn stream delta markdown như cũ (client cũ không gãy),
+    nhưng kèm thêm "steps" đã tách cấu trúc để canvas web render — xem step_segmenter.
+    """
+    history_contents = []
     for msg in (history or []):
         role = "user" if msg["role"] == "user" else "model"
-        contents.append(types.Content(role=role, parts=[types.Part(text=msg["content"])]))
+        history_contents.append(types.Content(role=role, parts=[types.Part(text=msg["content"])]))
 
     if is_problem:
         current_prompt = build_solve_prompt_v2(question, rag_chunks, bank_matches)
@@ -28,50 +161,105 @@ async def solve_stream(
         current_prompt = question
         system = CHAT_SYSTEM
 
-    contents.append(types.Content(role="user", parts=[types.Part(text=current_prompt)]))
+    solve_contents = history_contents + [
+        types.Content(role="user", parts=[types.Part(text=current_prompt)])
+    ]
 
     loop = asyncio.get_event_loop()
-    queue: asyncio.Queue = asyncio.Queue()
 
-    def _stream_in_thread():
-        try:
-            response = client.models.generate_content_stream(
-                model="gemini-3.5-flash",
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    temperature=0.5,
-                    top_p=1,
-                    system_instruction=system,
-                    thinking_config=types.ThinkingConfig(thinking_budget=0),
-                ),
-            )
-            for chunk in response:
-                text = chunk.text if chunk.text else ""
-                if text:
-                    loop.call_soon_threadsafe(queue.put_nowait, text)
-        finally:
-            loop.call_soon_threadsafe(queue.put_nowait, None)
+    def _run_stream(contents, cfg, queue: asyncio.Queue):
+        """Chạy 1 lời gọi stream trong thread, đẩy (kind, text) vào queue, kết bằng None."""
+        def _worker():
+            try:
+                for chunk in client.models.generate_content_stream(
+                    model="gemini-3.5-flash", contents=contents, config=cfg
+                ):
+                    for kind, text in _iter_parts(chunk):
+                        if kind:
+                            loop.call_soon_threadsafe(queue.put_nowait, (kind, text))
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+        return loop.run_in_executor(None, _worker)
 
-    thread_future = loop.run_in_executor(None, _stream_in_thread)
+    def _thinking_chunk(text: str) -> dict:
+        # Event RIÊNG: bot Zalo/mobile gom `delta` để lưu ChatHistory sẽ bỏ qua,
+        # canvas web render khối "Đang suy nghĩ".
+        return {"id": message_id, "session_id": session_id, "thinking": text, "done": False}
+
+    # PHA 1: sinh RIÊNG phần suy nghĩ (chỉ khi giải toán)
+    if is_problem:
+        think_q: asyncio.Queue = asyncio.Queue()
+        think_cfg = types.GenerateContentConfig(
+            temperature=0.5,
+            system_instruction=THINKING_SYSTEM,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+        )
+        think_prompt = f"[BÀI TOÁN]\n{question}"
+        think_future = _run_stream(
+            [types.Content(role="user", parts=[types.Part(text=think_prompt)])],
+            think_cfg,
+            think_q,
+        )
+        while True:
+            item = await think_q.get()
+            if item is None:
+                break
+            kind, text = item
+            if kind == "delta":  # phần suy nghĩ là text thường
+                yield _thinking_chunk(text)
+        await think_future
+
+    # PHA 2: lời giải chính (bật code execution cho bài toán)
+    solve_q: asyncio.Queue = asyncio.Queue()
+    solve_cfg = types.GenerateContentConfig(
+        temperature=0.5,
+        top_p=1,
+        system_instruction=system,
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+        # Code execution né lỗi MALFORMED_RESPONSE ở bài số thập phân/LaTeX nặng; không
+        # stream code ra client (đã bỏ hiển thị verify) — xem xử lý kind code bên dưới.
+        tools=[types.Tool(code_execution=types.ToolCodeExecution())] if is_problem else None,
+    )
+    solve_future = _run_stream(solve_contents, solve_cfg, solve_q)
+
+    want_steps = response_format == "steps" and is_problem
+    accumulated = ""
+    sent_steps = 0
 
     while True:
-        text = await queue.get()
-        if text is None:
+        item = await solve_q.get()
+        if item is None:
             break
-        yield {
-            "id": message_id,
-            "session_id": session_id,
-            "delta": text,
-            "done": False,
-        }
+        kind, text = item
+
+        # Code execution VẪN chạy (né malformed) nhưng KHÔNG stream ra client.
+        if kind in ("code", "code_ok", "code_err"):
+            continue
+
+        chunk = {"id": message_id, "session_id": session_id, "delta": text, "done": False}
+        if want_steps:
+            accumulated += text
+            steps = segment_steps(accumulated)
+            complete = steps[:-1] if steps else []
+            if len(complete) > sent_steps:
+                chunk["steps"] = complete[sent_steps:]
+                sent_steps = len(complete)
+        yield chunk
+
+    thread_future = solve_future
 
     await thread_future
 
     rag_used = bool(rag_chunks) or bool(bank_matches)
-    yield {
+    done_chunk = {
         "id": message_id,
         "session_id": session_id,
         "delta": "",
         "done": True,
         "rag_used": rag_used,
     }
+    if want_steps:
+        # Chốt bằng danh sách ĐẦY ĐỦ: client thay thế toàn bộ, tránh lệch nếu có
+        # delta nào rớt giữa chừng.
+        done_chunk["steps_final"] = segment_steps(accumulated)
+    yield done_chunk
