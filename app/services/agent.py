@@ -841,14 +841,44 @@ async def _handle_find_tutor(ctx, cur_subject_name, cur_grade, subjects_hint,
         tutors=tutors, context_patch=patch_fn())
 
 
-_SAME_TUTOR_KEYWORDS = [
-    "đổi gia sư", "gia sư khác", "chưa ưng", "không ưng", "chưa phù hợp", "không phù hợp",
-    "muốn đổi", "tìm người khác", "gia sư mới",
-]
-_NEW_NEED_KEYWORDS = [
-    "môn khác", "khác môn", "lớp khác", "khác lớp", "giới tính khác", "khác giới tính",
-    "mục tiêu khác", "khác mục tiêu", "nhu cầu khác", "khác hẳn", "nhu cầu mới",
-]
+def _reopen_choice_extract_config(lang: str) -> types.GenerateContentConfig:
+    instruction = (
+        "Bạn là bộ PHÂN LOẠI ý định cho trợ lý tìm gia sư Tutora. Lượt trước trợ lý vừa hỏi "
+        "phụ huynh 2 lựa chọn:\n"
+        "(1) đổi sang gia sư KHÁC nhưng GIỮ NGUYÊN môn/lớp/tiêu chí đang tìm.\n"
+        "(2) tìm gia sư cho NHU CẦU KHÁC HẲN (đổi môn/lớp/mục tiêu/giới tính gia sư mong "
+        "muốn...).\n"
+        "Đọc TIN NHẮN MỚI NHẤT của phụ huynh (có thể trả lời tự do, không đúng số thứ tự, "
+        "diễn đạt bất kỳ cách nào) và phân loại đúng ý PH muốn nói. Trả về DUY NHẤT JSON, "
+        "không giải thích, không markdown:\n"
+        '{"choice": "same" | "new" | "unclear"}\n'
+        '- "same": PH chọn ý (1) — đổi gia sư khác, giữ nguyên tiêu chí đang tìm.\n'
+        '- "new": PH chọn ý (2) — nhu cầu khác hẳn, kể cả diễn đạt gián tiếp như "tôi muốn '
+        'đổi nhu cầu", "đổi hẳn sang cái khác", "không phải cái này mà là...".\n'
+        '- "unclear": câu trả lời không đủ rõ để xác định là (1) hay (2), lạc đề, hoặc PH '
+        "hỏi lại/nói chuyện khác.\n"
+        "CHỈ dựa vào tin nhắn mới nhất, không suy diễn thêm ngoài nội dung PH thực sự nói."
+    )
+    return types.GenerateContentConfig(
+        system_instruction=instruction, temperature=0.1, response_mime_type="application/json",
+    )
+
+
+async def _classify_reopen_choice_llm(history_contents: list, lang: str = "vi") -> str | None:
+    """LLM phân loại ý PH cho câu hỏi disambiguation — thay keyword cứng (dễ vỡ với cách diễn
+    đạt tự nhiên không lường trước). Bug thật 2026-07-17: "tôi muốn đổi nhu cầu" từng bị nhận
+    nhầm "same" vì trùng từ khoá "muốn đổi" trong khi thiếu đúng cụm "nhu cầu khác"/"nhu cầu
+    mới" — mỗi lần vá 1 từ khoá lại có nguy cơ vỡ với cách nói khác, nên để LLM tự suy luận ý
+    thay vì tiếp tục vá danh sách cố định. Trả None nếu lỗi hoặc model tự nhận "unclear" ->
+    nơi gọi hỏi lại, không đoán bừa."""
+    try:
+        resp = await _generate(list(history_contents), _reopen_choice_extract_config(lang))
+        data = json.loads((resp.text or "{}").strip())
+        choice = data.get("choice")
+        return choice if choice in ("same", "new") else None
+    except Exception as e:
+        print(f"agent _classify_reopen_choice_llm error: {e}")
+        return None
 
 
 def _reopen_choice_suggestions(lang: str) -> list[str]:
@@ -869,28 +899,24 @@ def _reopen_choice_fallback_reply(lang: str) -> str:
             "nhu cầu khác (môn/lớp/giới tính khác...) ạ?")
 
 
-def _classify_reopen_choice(text: str) -> str | None:
+async def _classify_reopen_choice(text: str, history_contents: list, lang: str = "vi") -> str | None:
     """PH vừa trả lời câu hỏi 2-lựa-chọn (sendNumberedList = text thường, không phải nút bấm
-    thật) -> đoán "same" (đổi gia sư, giữ tiêu chí) hay "new" (nhu cầu khác hẳn) bằng từ khoá.
+    thật) -> đoán "same" (đổi gia sư, giữ tiêu chí) hay "new" (nhu cầu khác hẳn). "1"/"2" là
+    tap trực tiếp trên numbered list -> map thẳng, khỏi tốn LLM. Còn lại (trả lời tự do) luôn
+    qua LLM phân loại (xem _classify_reopen_choice_llm — lý do bỏ keyword cứng).
     Không đoán được -> None, gọi nơi dùng hỏi lại thay vì rẽ nhánh bừa."""
     t = text.strip().lower()
-    has_same = any(k in t for k in _SAME_TUTOR_KEYWORDS)
-    has_new = any(k in t for k in _NEW_NEED_KEYWORDS)
-    if has_same and not has_new:
-        return "same"
-    if has_new and not has_same:
-        return "new"
     if t in ("1", "1.", "option 1"):
         return "same"
     if t in ("2", "2.", "option 2"):
         return "new"
-    return None
+    return await _classify_reopen_choice_llm(history_contents, lang)
 
 
 async def _handle_reopen_choice(ctx, message: str, history_contents, patch_fn, patch_out,
                                 lang: str = "vi") -> AgentResponse:
     """Đọc câu trả lời của PH cho câu hỏi disambiguation vừa hỏi (xem _handle_find_tutor)."""
-    choice = _classify_reopen_choice(message)
+    choice = await _classify_reopen_choice(message, history_contents, lang)
     if choice is None:
         # Trả lời không rõ ý -> hỏi lại đúng 2 lựa chọn, KHÔNG đoán bừa (tránh tìm/mở form sai).
         r = await _say(

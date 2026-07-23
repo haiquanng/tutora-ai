@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tutora-fe-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "C:/Users/lequo/OneDrive/Documents/GitHub/Tutora-FE"],
+      "port": 5173
+    }
+  ]
+}
