@@ -6,6 +6,7 @@ CLASSIFY_PROMPT = """Phân tích input và trả về JSON:
 {
   "is_math_related": true/false,
   "is_problem": true/false,
+  "is_learning_content": true/false,
   "grade": "9/10/11/12/thi_vao_10/thi_thpt hoặc null",
   "chapter": "Lấy ĐÚNG TÊN từ danh sách bên dưới, hoặc null nếu không khớp",
   "topic": "dai_so/giai_tich/hinh_hoc_phang/hinh_hoc_khong_gian/xac_suat_thong_ke hoặc null",
@@ -28,6 +29,12 @@ ung_dung_dao_ham_de_khao_sat_va_ve_do_thi_ham_so, ung_dung_tich_phan, vecto, xac
 - is_math_related = true nếu input liên quan đến Toán học (bài toán, câu hỏi về toán, chào hỏi thông thường).
 - is_math_related = false nếu input hoàn toàn ngoài phạm vi Toán (y học, lịch sử, vũ khí, code, nấu ăn, v.v.).
 - is_problem = false nếu là câu chào, hỏi thăm, không phải bài toán cụ thể.
+- is_learning_content = true nếu input yêu cầu TẠO/TRÌNH BÀY nội dung học tập để đưa lên canvas:
+  giải bài toán, tổng hợp/note công thức, lý thuyết, cheat sheet, bảng so sánh, ví dụ mẫu...
+  = false nếu chỉ là câu HỘI THOẠI/ĐIỀU KHIỂN, không sinh nội dung học mới: "bỏ chữ này đi",
+  "note ok chưa", "cảm ơn", "làm lại", "dễ hiểu không", "đóng canvas", lời khen/phản hồi...
+  (Câu điều khiển canvas như "bỏ dòng cuối" cũng là false — nó sửa cách trình bày, KHÔNG sinh
+  kiến thức mới; để chat xử lý, giữ nội dung canvas cũ.)
 CHỈ trả về JSON."""
 
 async def classify_problem(client: genai.Client, problem_text: str) -> dict:
@@ -45,4 +52,5 @@ async def classify_problem(client: genai.Client, problem_text: str) -> dict:
         return json.loads(response.text)
     except Exception as e:
         print(f"Classifier error: {e}")
-        return {"is_math_related": True, "is_problem": True, "grade": None, "chapter": None, "topic": None, "confidence": 0.0}
+        return {"is_math_related": True, "is_problem": True, "is_learning_content": True,
+                "grade": None, "chapter": None, "topic": None, "confidence": 0.0}

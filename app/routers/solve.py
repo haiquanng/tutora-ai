@@ -68,15 +68,13 @@ async def _sse_generator(
         grade, chapter = body.grade, body.chapter
         clf = await classifier.classify_problem(gemini, problem_text)
         is_math_related = clf.get("is_math_related", True)
-        is_problem = True if from_image else clf.get("is_problem", True)
+        is_learning_content = clf.get("is_learning_content", True)
+        wants_canvas = body.response_format == "steps" and is_learning_content
+        is_problem = True if (from_image or wants_canvas) else clf.get("is_problem", True)
         grade = grade or clf.get("grade")
         chapter = chapter or clf.get("chapter")
 
-        # Off-topic hoặc không phải bài toán -> để LLM (CHAT_SYSTEM, đã kèm _SCOPE_RULE)
-        # tự trả lời/từ chối tự nhiên theo persona, KHÔNG dùng câu cứng hard-code.
         if is_math_related and is_problem:
-            # rag_chunks = bài mẫu SGK VN (kèm lời giải) -> AI bám PHƯƠNG PHÁP chuẩn.
-            # (Bảng questions bank riêng chưa có ở Supabase này nên không truy vấn.)
             rag_chunks, _ = await rag.retrieve_chunks(
                 sb=sb, model=embed_model, query=problem_text,
                 grade=grade, chapter=chapter, top_k=settings.rag_top_k,
@@ -95,7 +93,8 @@ async def _sse_generator(
             history=history,
             is_problem=is_problem,
             bank_matches=bank_matches,
-            response_format=body.response_format,
+            # Chỉ tách steps (canvas) khi là nội dung học tập; hội thoại -> markdown thường.
+            response_format="steps" if wants_canvas else "markdown",
         ):
             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 

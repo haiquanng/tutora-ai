@@ -7,6 +7,9 @@ class SolutionStep(TypedDict):
     title: str
     explanation: str
     formulas: List[str]
+    goal: str
+    detailed: str
+    hints: List[str]
 
 
 # TUTOR_SYSTEM_V2 quy định mỗi bước mở đầu bằng "**Bước N: tên bước**" và CẤM heading (#).
@@ -22,6 +25,14 @@ _DISPLAY_FORMULA = re.compile(r"\$\$(.+?)\$\$", re.DOTALL)
 # Dòng chốt đáp án / mẹo nhớ (blockquote) — gom thành bước "Kết luận" thay vì bỏ rơi.
 _RESULT_LINE = re.compile(r"^\s*(?:>|\*\*(?:Kết quả|Đáp án))", re.IGNORECASE)
 
+_MARKER_LABELS = r"Vì sao|Kỹ hơn|Gợi ý\s*\d*"
+_MARKER = re.compile(
+    r"\*\*\s*(?P<label>" + _MARKER_LABELS + r")\s*:?\s*\*\*\s*:?\s*"
+    r"(?P<body>.*?)"
+    r"(?=\*\*\s*(?:" + _MARKER_LABELS + r")\s*:?\s*\*\*|\n|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def _split_formulas(body: str) -> tuple[str, List[str]]:
     """Tách các block $$...$$ khỏi phần diễn giải."""
@@ -31,12 +42,46 @@ def _split_formulas(body: str) -> tuple[str, List[str]]:
     return explanation, formulas
 
 
+def _split_markers(body: str) -> tuple[str, str, str, List[str]]:
+    """
+    Bóc marker canvas (**Vì sao:** / **Kỹ hơn:** / **Gợi ý N:**) khỏi body — dù model
+    viết chúng ĐẦU DÒNG hay INLINE giữa câu (Gemini hay nhét liền, xem ảnh bug 2026-07).
+
+    Trả (body_còn_lại, goal, detailed, hints). Text ngoài marker giữ nguyên để explanation
+    mặc định đọc liền mạch. Marker cắt ngang khi stream dở (chưa đủ "**") thì không khớp
+    -> tạm nằm trong explanation, tới chunk sau đủ marker mới bóc ra.
+    """
+    goal = ""
+    detailed = ""
+    hints: List[str] = []
+
+    def _capture(m: "re.Match[str]") -> str:
+        nonlocal goal, detailed
+        label = m.group("label").lower()
+        text = m.group("body").strip()
+        if not text:
+            return ""
+        if label.startswith("vì sao") and not goal:
+            goal = text
+        elif label.startswith("kỹ hơn") and not detailed:
+            detailed = text
+        elif label.startswith("gợi ý"):
+            hints.append(text)
+        return ""  # bóc khỏi explanation
+
+    kept = _MARKER.sub(_capture, body)
+    kept = re.sub(r"(?m)^[ \t]*[*+-][ \t]*$\n?", "", kept)
+    # Dọn khoảng trắng thừa để lại sau khi cắt marker inline (vd " . " -> ".").
+    kept = re.sub(r"[ \t]{2,}", " ", kept)
+    kept = re.sub(r"\n{3,}", "\n\n", kept).strip()
+    return kept, goal, detailed, hints
+
+
 def segment_steps(markdown: str) -> List[SolutionStep]:
     """
-    Tách lời giải markdown thành các bước có cấu trúc cho canvas.
-
-    Dùng cho response_format="steps". Chịu được markdown dở dang (đang stream):
-    phần trước "Bước 1" gom vào bước "Phân tích đề", bước cuối có thể còn viết tiếp.
+    Tách NỘI DUNG CANVAS (đã bóc khỏi chat bởi _CanvasSplitter, xem solver_stream.py)
+    thành các bước có cấu trúc. Chịu được markdown dở dang (đang stream): phần trước
+    "Bước 1" gom vào bước "Phân tích đề", bước cuối có thể còn viết tiếp.
     """
     if not markdown.strip():
         return []
@@ -57,11 +102,21 @@ def segment_steps(markdown: str) -> List[SolutionStep]:
     steps: List[SolutionStep] = []
 
     def _add(title: str, body: str) -> None:
+        # Bóc marker canvas TRƯỚC khi tách công thức: goal/hint có thể nằm cạnh $$...$$.
+        body, goal, detailed, hints = _split_markers(body)
         explanation, formulas = _split_formulas(body)
-        if not explanation and not formulas:
+        if not explanation and not formulas and not goal and not detailed and not hints:
             return
         steps.append(
-            {"index": len(steps), "title": title, "explanation": explanation, "formulas": formulas}
+            {
+                "index": len(steps),
+                "title": title,
+                "explanation": explanation,
+                "formulas": formulas,
+                "goal": goal,
+                "detailed": detailed,
+                "hints": hints,
+            }
         )
 
     # Không có "Bước N" nào (bài ngắn, trắc nghiệm trả lời thẳng) -> 1 bước duy nhất.
