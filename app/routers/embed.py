@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 
 from ..models.embed import EmbedRequest, EmbedResponse
 from ..core.dependencies import get_gemini_client
-from ..services.embed import embed_questions
+from ..services.homework.embed import embed_questions
 
 router = APIRouter(prefix="/api/v1")
 

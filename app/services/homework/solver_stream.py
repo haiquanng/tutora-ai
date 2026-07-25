@@ -2,7 +2,7 @@ import asyncio
 from typing import Optional, List, AsyncGenerator
 from google import genai
 from google.genai import types
-from ..utils.prompt import (
+from ...utils.prompt import (
     TUTOR_SYSTEM_V2,
     CHAT_SYSTEM,
     THINKING_SYSTEM,

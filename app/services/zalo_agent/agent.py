@@ -29,14 +29,14 @@ from google import genai
 from google.genai import types
 from google.genai import errors as genai_errors
 
-from ..core.config import get_settings
-from ..core.dependencies import get_gemini_client, get_supabase
-from ..models.schemas import (
+from ...core.config import get_settings
+from ...core.dependencies import get_gemini_client, get_supabase
+from ...models.schemas import (
     AgentRequest, AgentResponse, AgentContextPatch, TutorChatFilters,
     TutorChatContext, DirectSearchRequest, DirectSearchResponse,
 )
-from .tutor_chat import _fetch_candidates, _get_subjects, _normalize_city
-from .rag import retrieve_chunks
+from ..web_agent.tutor_chat import _fetch_candidates, _get_subjects, _normalize_city
+from ..shared.rag import retrieve_chunks
 
 _settings = get_settings()
 

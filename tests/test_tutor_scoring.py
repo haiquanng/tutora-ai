@@ -1,5 +1,5 @@
 """Unit test cho score_tutor (Pha 3 ranking) — thuần, không gọi DB/Gemini, tất định."""
-from app.services.tutor_matching import score_tutor, _bayesian_rating
+from app.services.tutoring_shared.matching import score_tutor, _bayesian_rating
 
 
 def test_bayesian_keo_rating_it_review_ve_trung_binh():

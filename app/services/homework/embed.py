@@ -15,7 +15,7 @@ import asyncio
 
 from google import genai
 
-from ..models.embed import EmbedRequest, EmbedResponse, EmbedResultItem
+from ...models.embed import EmbedRequest, EmbedResponse, EmbedResultItem
 
 GEMINI_EMBED_MODEL = "gemini-embedding-2"
 EMBED_DIM = 768

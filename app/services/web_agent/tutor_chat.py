@@ -14,9 +14,9 @@ import httpx
 from google import genai
 from google.genai import types
 
-from ..core.config import get_settings
-from ..core.dependencies import get_gemini_client
-from ..models.schemas import (
+from ...core.config import get_settings
+from ...core.dependencies import get_gemini_client
+from ...models.schemas import (
     TutorChatRequest,
     TutorChatResponse,
     TutorChatFilters,

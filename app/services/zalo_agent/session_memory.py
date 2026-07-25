@@ -19,8 +19,8 @@ import json
 from google import genai
 from google.genai import types
 
-from ..core.dependencies import get_gemini_client
-from ..models.schemas import (
+from ...core.dependencies import get_gemini_client
+from ...models.schemas import (
     SummarizeSessionRequest,
     SummarizeSessionResponse,
     SessionMemory,

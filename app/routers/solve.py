@@ -5,7 +5,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from typing import AsyncGenerator
 from ..models.schemas import SolveRequest
-from ..services import ocr, classifier, rag, solver_stream
+from ..services.homework import ocr, classifier, solver_stream
+from ..services.shared import rag
 from ..core.dependencies import get_embed_model, get_supabase, get_gemini_client
 from ..core.config import get_settings
 from ..core.limiter import limiter, RATE_LIMIT_PER_MINUTE, RATE_LIMIT_PER_HOUR

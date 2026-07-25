@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 
 from supabase import Client
 
-from ..core.dependencies import get_supabase, get_supabase_dev
+from ...core.dependencies import get_supabase, get_supabase_dev
 
 FAST_PATH_MINUTES = 2      # độ trễ tối đa của đường chính; poll nhẹ, gần như luôn 0 dòng
 SWEEP_INTERVAL_HOURS = 6   # lưới an toàn: bắt update fast-path sót + xoá orphan

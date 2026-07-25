@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 from ..models.schemas import TutorChatRequest, TutorChatResponse
-from ..services.tutor_chat import tutor_chat
+from ..services.web_agent.tutor_chat import tutor_chat
 
 router = APIRouter(prefix="/api/v1")
 

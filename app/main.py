@@ -8,7 +8,7 @@ from .routers import health, solve, recommend, tutor_chat, agent, embed, extract
 from .core.middleware import configure_middleware
 from .core.openapi import configure_openapi
 from .core.limiter import limiter
-from .services.tutor_vector_sync import fast_path_loop, reconcile_sweep_loop
+from .services.tutoring_shared.vector_sync import fast_path_loop, reconcile_sweep_loop
 
 
 @asynccontextmanager

@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 from ..models.schemas import TutorRecommendRequest, TutorRecommendResponse
-from ..services.tutor_matching import match_tutors
+from ..services.tutoring_shared.matching import match_tutors
 
 router = APIRouter(prefix="/api/v1")
 

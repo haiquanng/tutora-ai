@@ -1,7 +1,7 @@
 import asyncio
 
-from app.services.step_segmenter import segment_steps
-from app.services import solver_stream
+from app.services.homework.step_segmenter import segment_steps
+from app.services.homework import solver_stream
 
 # Lời giải mẫu đúng format TUTOR_SYSTEM_V2 quy định: "**Bước N: ...**", $$...$$,
 # chốt "**Kết quả là:**" và blockquote mẹo nhớ.

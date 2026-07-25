@@ -2,9 +2,9 @@ import math
 from typing import Optional
 from google import genai
 from supabase import Client
-from ..core.config import get_settings
-from ..core.dependencies import get_supabase, get_gemini_client
-from ..models.schemas import TutorRecommendResult
+from ...core.config import get_settings
+from ...core.dependencies import get_supabase, get_gemini_client
+from ...models.schemas import TutorRecommendResult
 
 _settings = get_settings()
 
