@@ -35,7 +35,7 @@ from ...models.schemas import (
     AgentRequest, AgentResponse, AgentContextPatch, TutorChatFilters,
     TutorChatContext, DirectSearchRequest, DirectSearchResponse,
 )
-from ..web_agent.tutor_chat import _fetch_candidates, _get_subjects, _normalize_city
+from ..tutoring_shared.candidates import _fetch_candidates, _get_subjects, _normalize_city
 from ..shared.rag import retrieve_chunks
 
 _settings = get_settings()
