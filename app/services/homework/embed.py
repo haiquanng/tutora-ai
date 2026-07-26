@@ -2,7 +2,7 @@
 Embed service — biến CHỮ thành VECTOR cho question bank.
 
 tutora-ai đóng vai "máy embed" stateless cho .NET: nhận content câu hỏi, trả
-vector(768) qua gemini-embedding-2 (cùng model/dim với rag_chunks & tutor_vectors,
+vector(768) qua gemini-embedding-2 (cùng model/dim với rag_chunks & tutor_embeddings,
 để mọi vector trong hệ dùng chung không gian embedding). KHÔNG chạm DB — .NET tự
 ghi vector vào cột embedding của bảng questions (DB-A do .NET sở hữu).
 

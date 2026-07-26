@@ -10,7 +10,7 @@ _settings = get_settings()
 
 META_COLS = "tutor_id, city, district, teaching_mode, subject_ids, grades, price_min, price_max, average_rating, total_reviews, completed_hours"
 
-# ─── Pha 3: scoring (đã thiết kế sẵn ở migration 20260618_tutor_vectors_add_meta.sql,
+# ─── Pha 3: scoring (đã thiết kế sẵn ở migration 20260618_tutor_embeddings_add_meta.sql,
 # implement ở đây). Thuần, không gọi DB -> unit-test độc lập với Supabase/Gemini.
 
 # Bayesian average: kéo rating của gia sư ít review về trung bình hệ thống, tránh
@@ -101,7 +101,7 @@ async def match_tutors(
         if not ids:
             return []
         meta_rows = (
-            sb.table("tutor_vectors")
+            sb.table("tutor_embeddings")
             .select(META_COLS)
             .in_("tutor_id", ids)
             .execute()
@@ -145,7 +145,7 @@ async def match_tutors(
     similarity_map = {r["tutor_id"]: r["similarity"] for r in rows}
 
     meta_rows = (
-        sb.table("tutor_vectors")
+        sb.table("tutor_embeddings")
         .select(META_COLS)
         .in_("tutor_id", candidate_ids)
         .execute()
