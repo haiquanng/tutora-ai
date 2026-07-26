@@ -21,7 +21,7 @@ import fitz  # PyMuPDF
 from google import genai
 from google.genai import types
 
-from ..models.extract import ExtractPdfResponse, ExtractedQuestion
+from ...models.extract import ExtractPdfResponse, ExtractedQuestion
 
 MODEL = "gemini-2.5-flash"
 
