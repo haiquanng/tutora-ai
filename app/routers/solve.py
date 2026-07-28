@@ -85,6 +85,15 @@ async def _sse_generator(
         else:
             rag_chunks, bank_matches, is_problem = [], [], False
 
+        classification = None
+        if is_math_related and is_problem:
+            classification = {
+                "grade": grade,
+                "chapter": chapter,
+                "topic": clf.get("topic"),
+                "confidence": clf.get("confidence", 0.0),
+            }
+
         async for chunk in solver_stream.solve_stream(
             client=gemini,
             question=problem_text,
@@ -96,6 +105,8 @@ async def _sse_generator(
             bank_matches=bank_matches,
             # Chỉ tách steps (canvas) khi là nội dung học tập; hội thoại -> markdown thường.
             response_format="steps" if wants_canvas else "markdown",
+            classification=classification,
+            grade=grade,
         ):
             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 

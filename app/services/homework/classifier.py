@@ -13,17 +13,37 @@ CLASSIFY_PROMPT = """Phân tích input và trả về JSON:
   "confidence": 0.0-1.0
 }
 
-DANH SÁCH CHAPTER HỢP LỆ THEO BỘ GIÁO DỤC (chỉ dùng đúng tên này):
-bat_phuong_trinh_bac_nhat_hai_an, cac_so_dac_trung_do_muc_do_phan_tan_cua_mau_so_lieu_ghep_nhom,
-cac_so_dac_trung_do_xu_the_trung_tam_cua_mau_so_lieu_ghep_nhom, can_bac_hai, cap_so_cong,
-da_thuc, dao_ham, day_so_cap_so_cong_cap_so_nhan,
-duong_thang_va_mat_phang_trong_khong_gian_quan_he_song_song, gia_tri_luong_giac,
-gioi_han_ham_so, goc_luong_giac_va_gia_tri_luong_giac, ham_so_luong_giac,
-ham_so_luong_giac_va_phuong_trinh_luong_giac, ham_so_mu_va_ham_so_logarit,
-he_thuc_luong_trong_tam_giac, khao_sat_ham_so, menh_de, menh_de_tap_hop, nguyen_ham,
-phuong_phap_toa_do_trong_khong_gian, phuong_trinh_va_he_phuong_trinh_bac_nhat_hai_an,
-so_phuc, tich_phan, to_hop_xac_suat, ung_dung_dao_ham,
-ung_dung_dao_ham_de_khao_sat_va_ve_do_thi_ham_so, ung_dung_tich_phan, vecto, xac_suat_co_dieu_kien
+DANH SÁCH CHAPTER HỢP LỆ THEO BỘ GIÁO DỤC (chỉ dùng đúng tên này), nhóm theo lớp:
+
+[LỚP 9]
+phuong_trinh_va_he_phuong_trinh_bac_nhat_hai_an, can_bac_hai,
+bat_phuong_trinh_bac_nhat_mot_an, he_thuc_luong_trong_tam_giac_vuong, duong_tron,
+phuong_trinh_bac_hai_mot_an, da_thuc, tu_giac_noi_tiep_da_giac_deu,
+hinh_tru_hinh_non_hinh_cau, tan_so_tan_so_tuong_doi, xac_suat_cua_bien_co
+
+[LỚP 10]
+menh_de_tap_hop, menh_de, bat_phuong_trinh_bac_nhat_hai_an,
+he_thuc_luong_trong_tam_giac, gia_tri_luong_giac, vecto, ham_so_va_do_thi,
+ham_so_bac_hai_va_do_thi, phuong_phap_toa_do_trong_mat_phang, dai_so_to_hop,
+cac_so_dac_trung_cua_mau_so_lieu, xac_suat_bien_co
+
+[LỚP 11]
+day_so_cap_so_cong_cap_so_nhan, cap_so_cong, ham_so_luong_giac,
+ham_so_luong_giac_va_phuong_trinh_luong_giac, goc_luong_giac_va_gia_tri_luong_giac,
+ham_so_mu_va_ham_so_logarit, gioi_han_ham_so, dao_ham, to_hop_xac_suat,
+duong_thang_va_mat_phang_trong_khong_gian_quan_he_song_song,
+cac_so_dac_trung_do_xu_the_trung_tam_cua_mau_so_lieu_ghep_nhom
+
+[LỚP 12]
+ung_dung_dao_ham, ung_dung_dao_ham_de_khao_sat_va_ve_do_thi_ham_so, khao_sat_ham_so,
+nguyen_ham, tich_phan, ung_dung_tich_phan, so_phuc, phuong_phap_toa_do_trong_khong_gian,
+xac_suat_co_dieu_kien, cac_so_dac_trung_do_muc_do_phan_tan_cua_mau_so_lieu_ghep_nhom
+
+LƯU Ý PHÂN BIỆT (hay nhầm):
+- Phương trình bậc hai một ẩn (ax²+bx+c=0), hàm số y=ax² -> phuong_trinh_bac_hai_mot_an (lớp 9),
+  KHÔNG phải ham_so_bac_hai_va_do_thi (lớp 10, nói về parabol y=ax²+bx+c và đồ thị).
+- Hệ thức lượng trong tam giác VUÔNG (sin/cos/tan góc nhọn) -> he_thuc_luong_trong_tam_giac_vuong (lớp 9);
+  định lý sin/cosin cho tam giác bất kỳ -> he_thuc_luong_trong_tam_giac (lớp 10).
 
 ĐỊNH NGHĨA:
 - is_math_related = true nếu input liên quan đến Toán học (bài toán, câu hỏi về toán, chào hỏi thông thường).
@@ -41,7 +61,7 @@ async def classify_problem(client: genai.Client, problem_text: str) -> dict:
     """Phân loại bài toán → grade, chapter."""
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
+            model="gemini-2.5-flash",
             contents=f"{CLASSIFY_PROMPT}\n\nBài toán: {problem_text}",
             config=types.GenerateContentConfig(
                 temperature=0.1,
