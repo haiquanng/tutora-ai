@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 
 from ..models.extract import ExtractPdfResponse
 from ..core.dependencies import get_gemini_client
-from ..services.extract import extract_pdf
+from ..services.homework.extract import extract_pdf
 
 router = APIRouter(prefix="/api/v1")
 

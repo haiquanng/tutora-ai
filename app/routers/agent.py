@@ -4,8 +4,8 @@ from ..models.schemas import (
     SummarizeSessionRequest, SummarizeSessionResponse,
     DirectSearchRequest, DirectSearchResponse,
 )
-from ..services.agent import run_agent, search_tutors_direct
-from ..services.session_memory import summarize_session
+from ..services.zalo_agent.agent import run_agent, search_tutors_direct
+from ..services.zalo_agent.session_memory import summarize_session
 
 router = APIRouter(prefix="/api/v1")
 

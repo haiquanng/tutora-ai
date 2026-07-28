@@ -5,7 +5,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from typing import AsyncGenerator
 from ..models.schemas import SolveRequest
-from ..services import ocr, classifier, rag, solver_stream
+from ..services.homework import ocr, classifier, solver_stream
+from ..services.shared import rag
 from ..core.dependencies import get_embed_model, get_supabase, get_gemini_client
 from ..core.config import get_settings
 from ..core.limiter import limiter, RATE_LIMIT_PER_MINUTE, RATE_LIMIT_PER_HOUR
@@ -84,6 +85,15 @@ async def _sse_generator(
         else:
             rag_chunks, bank_matches, is_problem = [], [], False
 
+        classification = None
+        if is_math_related and is_problem:
+            classification = {
+                "grade": grade,
+                "chapter": chapter,
+                "topic": clf.get("topic"),
+                "confidence": clf.get("confidence", 0.0),
+            }
+
         async for chunk in solver_stream.solve_stream(
             client=gemini,
             question=problem_text,
@@ -95,6 +105,8 @@ async def _sse_generator(
             bank_matches=bank_matches,
             # Chỉ tách steps (canvas) khi là nội dung học tập; hội thoại -> markdown thường.
             response_format="steps" if wants_canvas else "markdown",
+            classification=classification,
+            grade=grade,
         ):
             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 

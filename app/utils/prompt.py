@@ -132,12 +132,33 @@ yêu cầu đổi, chỉ sửa đúng chỗ học sinh nói) — KHÔNG chỉ m�
 trống. Phần chat ngoài thẻ nói ngắn gọn đã đổi gì; nội dung thật phải nằm trong thẻ."""
 
 
+# Lớp -> ràng buộc công cụ được phép dùng.
+_GRADE_CONSTRAINTS = {
+    "9": "Học sinh đang học LỚP 9. CHỈ dùng kiến thức trong chương trình lớp 9 trở xuống: "
+         "KHÔNG dùng đạo hàm, tích phân, giới hạn, số phức, lượng giác nâng cao.",
+    "10": "Học sinh đang học LỚP 10. CHỈ dùng kiến thức lớp 10 trở xuống: "
+          "KHÔNG dùng đạo hàm, tích phân, số phức.",
+    "11": "Học sinh đang học LỚP 11. CHỈ dùng kiến thức lớp 11 trở xuống: "
+          "KHÔNG dùng tích phân, số phức.",
+    "12": "Học sinh đang học LỚP 12 — được dùng toàn bộ chương trình phổ thông.",
+    "thi_vao_10": "Học sinh đang ÔN THI VÀO LỚP 10. CHỈ dùng kiến thức THCS "
+                  "(KHÔNG đạo hàm/tích phân), trình bày theo chuẩn bài thi tuyển sinh.",
+    "thi_thpt": "Học sinh đang ÔN THI TỐT NGHIỆP THPT. Dùng kiến thức phổ thông, "
+                "ưu tiên cách giải nhanh phù hợp thi trắc nghiệm.",
+}
+
+
 def build_solve_prompt_v2(
     question: str,
     rag_chunks: Optional[List[dict]] = None,
     bank_matches: Optional[List[dict]] = None,
+    grade: Optional[str] = None,
 ) -> str:
     parts = []
+
+    constraint = _GRADE_CONSTRAINTS.get(grade or "")
+    if constraint:
+        parts.append(f"[TRÌNH ĐỘ HỌC SINH]\n{constraint}")
 
     # Uu tien: cau tuong tu trong question bank co LOI GIAI MAU (thay co/Bo GD) ->
     # AI tham chieu cach giai chuan, tranh biya, Viet hoa dung chuong trinh VN.
