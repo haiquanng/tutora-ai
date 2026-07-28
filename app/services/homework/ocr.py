@@ -60,7 +60,7 @@ async def extract_from_image(client: genai.Client, image_base64: str) -> str:
     mime = _detect_mime(image_bytes)
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
+            model="gemini-2.5-flash",
             contents=[
                 types.Content(parts=[
                     types.Part.from_bytes(data=image_bytes, mime_type=mime),
@@ -96,7 +96,7 @@ async def extract_from_url(client: genai.Client, image_url: str) -> str:
         mime = _detect_mime(image_bytes)
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
+            model="gemini-2.5-flash",
             contents=[
                 types.Content(parts=[
                     types.Part.from_bytes(data=image_bytes, mime_type=mime),
