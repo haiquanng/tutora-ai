@@ -1,10 +1,12 @@
 """
-Bóc text thô từ file admin upload (PDF / DOCX / XLSX) → list đoạn text để chunk.
+Bóc text thô từ file admin upload (PDF / DOCX / XLSX / MD) → list đoạn text để chunk.
 
 Mỗi định dạng có cách bóc khác nhau:
   • PDF  : PyMuPDF (fitz) — đọc text từng trang (tái dùng lib đã có ở homework/extract).
   • DOCX : python-docx — đọc từng paragraph.
   • XLSX : openpyxl — mỗi HÀNG = 1 đơn vị (bảng Q&A: ghép các ô thành 1 đoạn).
+  • MD   : text thuần — tách khối theo dòng trống, giống hệt update_document_content
+    (sửa tay trong CMS) vì bản chất là cùng 1 loại nội dung.
 
 Trả về list[str] các khối text THÔ (chưa chunk). Bước chunk (chunk.py) lo cắt tiếp
 khối văn xuôi dài; riêng XLSX mỗi hàng đã là 1 đơn vị tự nhiên nên trả sẵn từng hàng.
@@ -12,6 +14,7 @@ khối văn xuôi dài; riêng XLSX mỗi hàng đã là 1 đơn vị tự nhiê
 from __future__ import annotations
 
 import io
+import re
 
 
 class UnsupportedFileType(Exception):
@@ -26,7 +29,9 @@ def detect_source_type(file_name: str) -> str:
         return "docx"
     if name.endswith(".xlsx") or name.endswith(".xls"):
         return "xlsx"
-    raise UnsupportedFileType(f"Định dạng không hỗ trợ: {file_name} (chỉ pdf/docx/xlsx)")
+    if name.endswith(".md") or name.endswith(".markdown"):
+        return "md"
+    raise UnsupportedFileType(f"Định dạng không hỗ trợ: {file_name} (chỉ pdf/docx/xlsx/md)")
 
 
 def extract_blocks(file_bytes: bytes, source_type: str) -> list[str]:
@@ -37,7 +42,14 @@ def extract_blocks(file_bytes: bytes, source_type: str) -> list[str]:
         return _extract_docx(file_bytes)
     if source_type == "xlsx":
         return _extract_xlsx(file_bytes)
+    if source_type == "md":
+        return _extract_md(file_bytes)
     raise UnsupportedFileType(source_type)
+
+
+def _extract_md(file_bytes: bytes) -> list[str]:
+    text = file_bytes.decode("utf-8", errors="replace").strip()
+    return [b for b in re.split(r"\n\s*\n", text) if b.strip()]
 
 
 def _extract_pdf(file_bytes: bytes) -> list[str]:
