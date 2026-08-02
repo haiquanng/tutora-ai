@@ -30,13 +30,13 @@ from google.genai import types
 from google.genai import errors as genai_errors
 
 from ...core.config import get_settings
-from ...core.dependencies import get_gemini_client, get_supabase
+from ...core.dependencies import get_gemini_client
 from ...models.schemas import (
     AgentRequest, AgentResponse, AgentContextPatch, TutorChatFilters,
     TutorChatContext, DirectSearchRequest, DirectSearchResponse,
 )
 from ..tutoring_shared.candidates import _fetch_candidates, _get_subjects, _normalize_city
-from ..shared.rag import retrieve_chunks
+from ..knowledge.retrieve import retrieve_kb
 
 _settings = get_settings()
 
@@ -973,16 +973,14 @@ async def _handle_alternate_search(ctx, cur_subject_name, cur_grade, message, hi
 
 
 async def _handle_faq(question: str, history_contents, patch, lang: str = "vi") -> AgentResponse:
-    """RAG trên KB Tutora. Rỗng → câu an toàn, chống bịa tuyệt đối."""
+    """RAG trên KB Tutora (bảng tutora_kb_chunks, CEO nạp qua CMS/knowledge.ingest — KHÔNG phải
+    rag_chunks của RAG môn học). Rỗng → câu an toàn, chống bịa tuyệt đối."""
     try:
-        chunks, _ = await retrieve_chunks(
-            get_supabase(), None, question,
-            gemini=get_gemini_client(), subject="tutora_kb", min_similarity=0.6,
-        )
+        chunks = await retrieve_kb(question)
     except Exception as e:
         print(f"agent faq error: {e}")
         chunks = []
-    passages = [c.get("content") or c.get("text") for c in chunks]
+    passages = [c.get("content") for c in chunks]
     passages = [p for p in passages if p]
     if not passages:
         return AgentResponse(
