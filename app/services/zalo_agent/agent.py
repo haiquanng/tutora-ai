@@ -150,7 +150,8 @@ def _extract_config(subjects_hint: str, slots: dict, shown_hint: str, message: s
         "Bạn là bộ TRÍCH THÔNG TIN cho trợ lý tìm gia sư Tutora. Đọc lịch sử hội thoại + tin "
         "nhắn mới của phụ huynh, trả về DUY NHẤT một JSON (không giải thích, không markdown) "
         "theo schema:\n"
-        '{"intent": <một trong ' + str(_INTENT_VALUES) + ">, "
+        '{"scope": "on_topic" | "off_topic", '
+        '"intent": <một trong ' + str(_INTENT_VALUES) + ">, "
         '"subject": <tên môn nếu phụ huynh nêu/đổi, vd "Toán","Tiếng Anh","Ngữ văn"; null nếu không nhắc>, '
         '"grade": <số lớp 1-12 nếu nêu/đổi; null nếu không nhắc>, '
         '"goal": <mục tiêu học 1 cụm ngắn nếu nêu, vd "mất gốc","củng cố","nâng cao","ôn thi chuyển cấp","luyện SAT phần Toán"; null nếu không nhắc>, '
@@ -175,6 +176,14 @@ def _extract_config(subjects_hint: str, slots: dict, shown_hint: str, message: s
         "- CHỈ điền field khi phụ huynh THỰC SỰ nêu. KHÔNG bịa, KHÔNG suy diễn. Không nhắc = null.\n"
         "- Đã biết sẵn từ các lượt trước (nếu tin nhắn mới KHÔNG nhắc lại và KHÔNG đổi thì để "
         "null, hệ thống tự giữ giá trị cũ — đừng chép lại): " + known + ".\n"
+        "- SCOPE (xét TRƯỚC intent, dựa DUY NHẤT vào tin nhắn mới nhất): 'on_topic' = câu liên "
+        "quan tìm gia sư, học tập, kỳ thi/chứng chỉ, phương pháp học, hoặc chính sách/cách hoạt "
+        "động của Tutora — kể cả câu chào hỏi/xác nhận ngắn trong luồng tìm gia sư. 'off_topic' "
+        "= câu KHÔNG phục vụ mục đích tìm gia sư/học tập (thời sự, chính trị, thể thao, giải "
+        "trí, nhờ code hộ/viết bài hộ, phép tính hoặc kiến thức phổ thông đơn thuần không gắn "
+        "kỳ thi/môn học cụ thể như '1+1 bằng mấy', 'thủ đô nước Pháp là gì', tán gẫu không mục "
+        "đích...). Khi off_topic: vẫn điền intent bình thường (dùng 'chitchat' nếu không chắc) "
+        "nhưng BẮT BUỘC để knowledge_note=null — KHÔNG được trả lời nội dung câu hỏi đó.\n"
         "- MỤC TIÊU HIỂU RỘNG (KHÔNG giới hạn trong 1 danh sách cố định): BẤT KỲ tên kỳ thi/chứng "
         "chỉ/chương trình nào phụ huynh nhắc tới (SAT, IELTS, TOEIC, GMAT, HSG, đánh giá năng "
         "lực, chuyển cấp, thi vào 10, THPTQG, hay bất kỳ kỳ thi/chứng chỉ nào khác kể cả cái bạn "
@@ -190,12 +199,16 @@ def _extract_config(subjects_hint: str, slots: dict, shown_hint: str, message: s
         "intent='faq' cho câu hỏi về CHÍNH SÁCH/CÁCH HOẠT ĐỘNG của Tutora (hoàn tiền, học phí "
         "chung, cách đăng ký, quy trình...) — KHÔNG dùng faq cho bất kỳ câu hỏi kiến thức giáo "
         "dục/kỳ thi/phương pháp học nào.\n"
-        "- knowledge_note ĐI KÈM trường hợp trên, PHẠM VI RỘNG: bất kỳ câu hỏi kiến thức giáo dục "
-        "đại chúng nào — nội dung/cấu trúc kỳ thi ('GMAT thi gồm phần gì'), phương pháp học "
-        "('học Toán tư duy khác gì Toán thường', 'phương pháp Phonics là gì'), lộ trình/độ tuổi "
-        "phù hợp, hay kiến thức giáo dục phổ thông khác PH hỏi → điền knowledge_note = câu trả "
+        "- knowledge_note ĐI KÈM trường hợp trên, nhưng CÓ GIỚI HẠN — CHỈ áp dụng khi câu hỏi "
+        "gắn với 1 KỲ THI/CHỨNG CHỈ/PHƯƠNG PHÁP HỌC/MÔN HỌC cụ thể: nội dung/cấu trúc kỳ thi "
+        "('GMAT thi gồm phần gì'), phương pháp học ('học Toán tư duy khác gì Toán thường', "
+        "'phương pháp Phonics là gì'), lộ trình/độ tuổi phù hợp với 1 môn/kỳ thi, hay kiến thức "
+        "giáo dục khác PH hỏi GẮN VỚI nhu cầu tìm gia sư → điền knowledge_note = câu trả "
         "lời NGẮN GỌN, kiến thức phổ thông, giọng tham khảo không tuyệt đối (KHÔNG phải cam kết "
-        "của Tutora). Nếu bạn KHÔNG đủ tự tin trả lời chính xác (kỳ thi/khái niệm quá lạ/mới) → "
+        "của Tutora). KHÔNG áp dụng cho kiến thức phổ thông đơn lẻ KHÔNG gắn kỳ thi/môn học/"
+        "phương pháp học nào (phép tính đơn giản, sự kiện thời sự, kiến thức bách khoa chung "
+        "chung...) — những câu đó là scope='off_topic', để knowledge_note=null. Nếu bạn KHÔNG "
+        "đủ tự tin trả lời chính xác (kỳ thi/khái niệm quá lạ/mới) → "
         "vẫn điền 1 câu ngắn thừa nhận nhẹ nhàng KHÔNG chắc chắn tuyệt đối (vd 'phần này em chưa "
         "nắm rõ chi tiết') thay vì bịa chắc nịch — tuyệt đối không bỏ trống rồi im lặng bỏ qua "
         "câu hỏi. Mục đích: bot LUÔN trả lời đúng trọng tâm câu hỏi trước, rồi mới dẫn tự nhiên "
@@ -258,9 +271,13 @@ async def _extract_turn(history_contents: list, message: str, slots: dict,
         print(f"agent _extract_turn error: {e}")
         # Không hiểu được → coi như muốn tìm gia sư, để luồng hỏi tiếp (an toàn).
         # Trả ĐỦ key (code sau truy cập ex["subject"]... trực tiếp — thiếu key là KeyError).
-        return {"intent": "find_tutor", "subject": None, "grade": None, "goal": None,
-                "preferences": None, "tutor_ref": None, "rush": False, "knowledge_note": None,
-                "min_rate": None, "max_rate": None, "teaching_mode": None, "city": None}
+        return {"scope": "on_topic", "intent": "find_tutor", "subject": None, "grade": None,
+                "goal": None, "preferences": None, "tutor_ref": None, "rush": False,
+                "knowledge_note": None, "min_rate": None, "max_rate": None,
+                "teaching_mode": None, "city": None}
+    scope = data.get("scope")
+    if scope not in ("on_topic", "off_topic"):
+        scope = "on_topic"
     intent = data.get("intent")
     if intent not in _INTENT_VALUES:
         intent = "find_tutor"
@@ -274,6 +291,7 @@ async def _extract_turn(history_contents: list, message: str, slots: dict,
         teaching_mode = None
 
     return {
+        "scope": scope,
         "intent": intent,
         "subject": (data.get("subject") or None),
         "grade": data.get("grade") if isinstance(data.get("grade"), int) else None,
@@ -614,6 +632,23 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
     if ctx.pending_reopen_choice:
         return await _handle_reopen_choice(
             ctx, body.message, history_contents, _patch, patch_out, lang=lang)
+
+    # Guardrail: câu KHÔNG liên quan tìm gia sư/học tập/Tutora → từ chối lịch sự, KHÔNG trả
+    # lời nội dung câu hỏi (vd chính trị, thời sự, phép tính đơn thuần không gắn kỳ thi/môn
+    # học). Chặn ở đây, TRƯỚC mọi intent khác — kể cả intent bị đoán nhầm thành 'faq'/
+    # 'find_tutor' thì scope vẫn ưu tiên chặn trước.
+    if ex.get("scope") == "off_topic":
+        r = await _say(
+            "Phụ huynh vừa hỏi một điều KHÔNG liên quan tới việc tìm gia sư, học tập, hay "
+            "Tutora (vd chính trị, thời sự, phép tính/kiến thức phổ thông không phục vụ học "
+            "tập). Từ chối NGẮN GỌN, lịch sự: nói rõ mình chỉ hỗ trợ tìm gia sư và các câu hỏi "
+            "về học tập/Tutora, rồi hỏi anh/chị cần tìm gia sư môn gì, cho bé lớp mấy. TUYỆT "
+            "ĐỐI KHÔNG trả lời nội dung câu hỏi đó dù chỉ 1 phần.",
+            history_contents, lang=lang)
+        return AgentResponse(
+            reply=r or "Dạ mình là trợ lý của Tutora, chỉ hỗ trợ về việc tìm gia sư và các câu "
+            "hỏi liên quan đến học tập/Tutora thôi ạ. Anh/chị cần tìm gia sư môn gì, cho bé lớp "
+            "mấy để mình hỗ trợ nhé?", context_patch=_patch())
 
     # FAQ: RAG. Rỗng → câu an toàn, KHÔNG bịa.
     if intent == "faq":
