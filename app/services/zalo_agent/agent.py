@@ -641,14 +641,17 @@ async def run_agent(body: AgentRequest) -> AgentResponse:
         r = await _say(
             "Phụ huynh vừa hỏi một điều KHÔNG liên quan tới việc tìm gia sư, học tập, hay "
             "Tutora (vd chính trị, thời sự, phép tính/kiến thức phổ thông không phục vụ học "
-            "tập). Từ chối NGẮN GỌN, lịch sự: nói rõ mình chỉ hỗ trợ tìm gia sư và các câu hỏi "
-            "về học tập/Tutora, rồi hỏi anh/chị cần tìm gia sư môn gì, cho bé lớp mấy. TUYỆT "
+            "tập). Từ chối NGẮN GỌN, lịch sự, và PHẢI NÊU RÕ LÝ DO không trả lời được — nói "
+            "thẳng rằng câu hỏi này không liên quan đến việc tìm gia sư/học tập/Tutora nên "
+            "mình không hỗ trợ được, KHÔNG chỉ nói chung chung 'em là trợ lý Tutora' mà lờ đi "
+            "lý do. Sau đó mời anh/chị cho biết cần tìm gia sư môn gì, cho bé lớp mấy. TUYỆT "
             "ĐỐI KHÔNG trả lời nội dung câu hỏi đó dù chỉ 1 phần.",
             history_contents, lang=lang)
         return AgentResponse(
-            reply=r or "Dạ mình là trợ lý của Tutora, chỉ hỗ trợ về việc tìm gia sư và các câu "
-            "hỏi liên quan đến học tập/Tutora thôi ạ. Anh/chị cần tìm gia sư môn gì, cho bé lớp "
-            "mấy để mình hỗ trợ nhé?", context_patch=_patch())
+            reply=r or "Dạ câu hỏi này không liên quan đến việc tìm gia sư hay Tutora nên em "
+            "chưa hỗ trợ được ạ — em chỉ trả lời các câu hỏi về tìm gia sư và học tập thôi ạ. "
+            "Anh/chị cần tìm gia sư môn gì, cho bé lớp mấy để em hỗ trợ nhé?",
+            context_patch=_patch())
 
     # FAQ: RAG. Rỗng → câu an toàn, KHÔNG bịa.
     if intent == "faq":
