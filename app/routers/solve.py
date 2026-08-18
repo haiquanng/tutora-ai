@@ -107,6 +107,7 @@ async def _sse_generator(
             response_format="steps" if wants_canvas else "markdown",
             classification=classification,
             grade=grade,
+            proficiency=body.proficiency,
         ):
             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 

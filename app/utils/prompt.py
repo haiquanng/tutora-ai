@@ -148,17 +148,71 @@ _GRADE_CONSTRAINTS = {
 }
 
 
+_LEVEL_GUIDANCE = {
+    "beginner": "Học sinh đang MẤT GỐC môn này. Giải thật chậm, chia bước nhỏ, "
+                "nhắc lại định nghĩa/công thức trước khi dùng, KHÔNG bỏ bước trung gian, "
+                "không dùng cách giải tắt hay mẹo nâng cao.",
+    "developing": "Học sinh nắm được kiến thức nhận biết, còn chật vật ở vận dụng. "
+                  "Nêu rõ VÌ SAO chọn hướng giải đó, giải đủ bước, chốt lại phương pháp "
+                  "để lần sau tự làm được.",
+    "proficient": "Học sinh khá vững. Đi thẳng vào hướng giải, gọn bước máy móc, "
+                  "tập trung vào chỗ dễ sai và cách trình bày chuẩn.",
+    "advanced": "Học sinh giỏi. Trình bày súc tích, có thể nêu cách giải nhanh/nhiều hướng, "
+                "mở rộng nhận xét về dạng bài.",
+}
+
+
+def build_proficiency_block(prof) -> Optional[str]:
+    """Khối [HỒ SƠ TRÌNH ĐỘ] từ bài đánh giá đầu vào. None nếu chưa có gì dùng được.
+
+    Là bối cảnh ĐIỀU CHỈNH CÁCH GIẢI, không phải đề bài — nên nói rõ để model không
+    lôi profile ra bình luận với học sinh."""
+    if prof is None:
+        return None
+
+    lines = []
+    guidance = _LEVEL_GUIDANCE.get(getattr(prof, "level", None) or "")
+    if guidance:
+        lines.append(guidance)
+    if getattr(prof, "summary", None):
+        lines.append(f"Nhận xét từ bài đánh giá đầu vào: {prof.summary}")
+
+    weak = getattr(prof, "weak_chapters", None) or []
+    if weak:
+        lines.append(
+            "Chương học sinh còn hổng: " + ", ".join(weak[:6]) +
+            ". Nếu bài liên quan tới các chương này, giải kỹ hơn và nhắc lại kiến thức nền."
+        )
+    strong = getattr(prof, "strong_chapters", None) or []
+    if strong:
+        lines.append("Chương học sinh đã vững: " + ", ".join(strong[:6]) + ".")
+
+    if not lines:
+        return None
+
+    lines.append(
+        "KHÔNG nhắc tới hồ sơ/điểm số/bài đánh giá trong câu trả lời, không dạy đời — "
+        "chỉ dùng thông tin này để chọn độ sâu và cách diễn đạt."
+    )
+    return "[HỒ SƠ TRÌNH ĐỘ HỌC SINH]\n" + "\n".join(lines)
+
+
 def build_solve_prompt_v2(
     question: str,
     rag_chunks: Optional[List[dict]] = None,
     bank_matches: Optional[List[dict]] = None,
     grade: Optional[str] = None,
+    proficiency=None,
 ) -> str:
     parts = []
 
     constraint = _GRADE_CONSTRAINTS.get(grade or "")
     if constraint:
         parts.append(f"[TRÌNH ĐỘ HỌC SINH]\n{constraint}")
+
+    prof_block = build_proficiency_block(proficiency)
+    if prof_block:
+        parts.append(prof_block)
 
     # Uu tien: cau tuong tu trong question bank co LOI GIAI MAU (thay co/Bo GD) ->
     # AI tham chieu cach giai chuan, tranh biya, Viet hoa dung chuong trinh VN.
