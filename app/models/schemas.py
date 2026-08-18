@@ -1,6 +1,8 @@
 from pydantic import BaseModel, field_validator
 from typing import Optional, List, Any, Dict, Literal
 
+from .assessment import ProficiencyContext
+
 class HistoryMessage(BaseModel):
     role: str   # "user" | "assistant"
     content: str = ""
@@ -171,6 +173,9 @@ class SolveRequest(BaseModel):
     chat_id: Optional[str] = None
     history: List[HistoryMessage] = []
     response_format: Optional[Literal["markdown", "steps"]] = "markdown"
+    # Profile trình độ (từ bài đánh giá đầu vào) — FE/.NET nạp vào để lời giải khớp
+    # thực lực học sinh. Null = chưa làm bài đánh giá, giải như bình thường.
+    proficiency: Optional["ProficiencyContext"] = None
 
     @field_validator("response_format", mode="before")
     @classmethod

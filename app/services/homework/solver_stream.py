@@ -206,6 +206,7 @@ async def solve_stream(
     response_format: str = "markdown",
     classification: Optional[dict] = None,
     grade: Optional[str] = None,
+    proficiency=None,
 ) -> AsyncGenerator[dict, None]:
     """
     Stream text tự nhiên theo phong cách gia sư, không JSON.
@@ -221,7 +222,7 @@ async def solve_stream(
     want_steps = response_format == "steps" and is_problem
 
     if is_problem:
-        current_prompt = build_solve_prompt_v2(question, rag_chunks, bank_matches, grade)
+        current_prompt = build_solve_prompt_v2(question, rag_chunks, bank_matches, grade, proficiency)
         # Nội dung lên canvas (note độc lập) -> cắt hẳn giọng điệu chat (chào/hỏi tu từ),
         # xem _CANVAS_CONTENT_RULE. Không ảnh hưởng câu trả lời chat thường.
         system = TUTOR_SYSTEM_V2 + _CANVAS_CONTENT_RULE if want_steps else TUTOR_SYSTEM_V2
