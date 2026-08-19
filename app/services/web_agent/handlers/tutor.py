@@ -77,6 +77,20 @@ class TutorHandler(BaseHandler):
         shown = tutors[:_MAX_CARDS]
         cards = [_to_card(t, is_best=(i == 0 and ai_ranked)) for i, t in enumerate(shown)]
 
+        # Ranking degrade (.NET không gọi được AI rank) → `query` bị BỎ, kết quả chỉ là
+        # SQL lọc cứng. Nếu user có nêu mong muốn ngữ nghĩa (bằng cấp, kinh nghiệm...) thì
+        # câu router sinh dễ khẳng định sai → thay bằng câu trung thực, không hứa hão.
+        if cards and not ai_ranked:
+            reply = (
+                f"Mình tìm được {len(cards)} gia sư khớp môn/lớp và mức giá bạn cần. "
+                "Hiện mình chưa xếp hạng được theo các mong muốn chi tiết (bằng cấp, "
+                "kinh nghiệm…), bạn xem thử rồi cho mình biết để lọc kỹ hơn nhé."
+            )
+            return WebChatResponse(
+                reply=reply, intent="tutor", cards=cards,
+                filters=ctx.filters, ai_ranked=False, suggestions=ctx.suggestions,
+            )
+
         # Reply: ưu tiên câu router đã sinh; rỗng/không gia sư → câu mặc định rõ ràng
         # (KHÔNG để user hiểu nhầm danh sách cũ là kết quả — bài học từ luồng Zalo).
         reply = ctx.router_reply
@@ -86,7 +100,19 @@ class TutorHandler(BaseHandler):
                 "(giá, môn, khu vực…) nhé?"
             )
         elif not reply:
+            # Cho xem kết quả TRƯỚC rồi mời tinh chỉnh — thay vì chặn lại hỏi ngân sách/mục
+            # tiêu trước khi cho xem gì (hành vi "phỏng vấn thủ tục" user đã phản ánh).
+            # Chỉ mời bổ sung tiêu chí user CHƯA nêu, không hỏi lại cái đã biết.
             reply = f"Mình tìm được {len(cards)} gia sư phù hợp:"
+            missing = []
+            if not (ctx.filters.min_rate or ctx.filters.max_rate):
+                missing.append("ngân sách")
+            if not ctx.filters.tutor_gender:
+                missing.append("giới tính gia sư")
+            if missing:
+                reply += (
+                    f" Bạn muốn lọc sát hơn theo {' hoặc '.join(missing)} thì cho mình biết nhé."
+                )
 
         return WebChatResponse(
             reply=reply, intent="tutor", cards=cards,
