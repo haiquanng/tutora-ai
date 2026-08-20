@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1")
 
+# Dưới ngưỡng này thì tin hồ sơ học sinh hơn phán đoán từ đề bài.
+_GRADE_OVERRIDE_CONFIDENCE = 0.8
+
 
 _NO_MATH_REPLY = (
     "Mình chưa đọc được đề toán trong ảnh này. Bạn thử chụp lại rõ nét hơn "
@@ -72,16 +75,26 @@ async def _sse_generator(
         is_learning_content = clf.get("is_learning_content", True)
         wants_canvas = body.response_format == "steps" and is_learning_content
         is_problem = True if (from_image or wants_canvas) else clf.get("is_problem", True)
-        grade = grade or clf.get("grade")
+        # Lớp ĐỀ BÀI thắng lớp hồ sơ.
+        clf_grade = clf.get("grade")
+        if clf_grade and clf.get("confidence", 0.0) >= _GRADE_OVERRIDE_CONFIDENCE:
+            if grade and clf_grade != grade:
+                logger.info(
+                    "Lớp từ đề bài (%s) khác hồ sơ (%s) -> theo đề bài. chapter=%s conf=%.2f",
+                    clf_grade, grade, clf.get("chapter"), clf.get("confidence", 0.0),
+                )
+            grade = clf_grade
+        else:
+            grade = grade or clf_grade
         chapter = chapter or clf.get("chapter")
 
         if is_math_related and is_problem:
-            rag_chunks, _ = await rag.retrieve_chunks(
-                sb=sb, model=embed_model, query=problem_text,
-                grade=grade, chapter=chapter, top_k=settings.rag_top_k,
-                gemini=gemini,
+            # Bank (questions.embedding) là nguồn RAG DUY NHẤT
+            bank_matches = await rag.retrieve_questions(
+                sb=sb, query=problem_text, grade=grade, chapter=chapter,
+                top_k=settings.rag_top_k, gemini=gemini,
             )
-            bank_matches = []
+            rag_chunks = []
         else:
             rag_chunks, bank_matches, is_problem = [], [], False
 
