@@ -40,7 +40,10 @@ huynh/học sinh với GIA SƯ. Đọc lịch sử hội thoại + TIN NHẮN M�
     "tutor_gender": "male" | "female" | null,
     "subject_id": id môn (số) nếu user muốn tìm/đổi môn, ngược lại null,
     "grade_level_id": id LỚP (số) nếu user nêu lớp/cấp học, ngược lại null,
-    "desired_count": số gia sư user muốn xem nếu nêu rõ, ngược lại null
+    "desired_count": số gia sư user muốn xem nếu nêu rõ, ngược lại null,
+    "available_days": [số thứ] nếu user nêu NGÀY học mong muốn, ngược lại null,
+    "available_from": "HH:MM" nếu user nêu KHUNG GIỜ, ngược lại null,
+    "available_to": "HH:MM" nếu user nêu KHUNG GIỜ, ngược lại null
   }}
 }}
 
@@ -83,6 +86,19 @@ QUAN TRỌNG — HÀNH XỬ NHƯ TRỢ LÝ NGƯỜI THẬT, KHÔNG HỎI THỦ T
   VÍ DỤ: user dán đoạn giới thiệu của 1 gia sư → consult: "Bạn muốn tìm gia sư có đặc điểm
   giống mô tả này phải không ạ? Cho mình biết môn và lớp cần học nhé."
 - Đừng hỏi những câu máy móc vô nghĩa như "bạn muốn tìm bao nhiêu gia sư?".
+
+LỊCH RẢNH (available_days / available_from / available_to) — quy đổi sang SỐ và GIỜ:
+- Thứ (CHÚ Ý: mã KHÁC con số trong tên thứ, đừng lấy nguyên số user gõ):
+    "thứ 2"/"thứ hai"  → 1        "thứ 5"/"thứ năm" → 4
+    "thứ 3"/"thứ ba"   → 2        "thứ 6"/"thứ sáu" → 5
+    "thứ 4"/"thứ tư"   → 3        "thứ 7"/"thứ bảy" → 6   ← KHÔNG phải 7
+    "chủ nhật"/"CN"    → 7
+  Quy tắc: mã = (số trong tên thứ) − 1; riêng Chủ Nhật = 7.
+  "cuối tuần" → [6,7]; "trong tuần"/"ngày thường" → [1,2,3,4,5]; "thứ 3 và thứ 5" → [2,4].
+- Khung giờ: "sáng" → 08:00-11:00; "chiều" → 14:00-17:00; "tối" → 18:00-21:00.
+  Giờ cụ thể thì lấy đúng ("sau 19h" → 19:00-21:00; "7-9h tối" → 19:00-21:00).
+- CHỈ điền khi user nêu; không nhắc → null. Đây là filter CỨNG (lọc thẳng ở DB), nên
+  reply ĐƯỢC PHÉP khẳng định đã lọc theo lịch (khác bằng cấp — cái đó chỉ ưu tiên).
 
 DANH SÁCH MÔN (chọn đúng id khi user nêu môn):
 {subjects}
@@ -162,5 +178,31 @@ async def route(
         "intent": intent,
         "reply": (data.get("reply") or "").strip(),
         "suggestions": (data.get("suggestions") or [])[:3],
-        "filters": data.get("filters") or {},
+        "filters": _fix_days(data.get("filters") or {}, message),
     }
+
+
+# Thứ trong tin nhắn → mã days_of_week.
+_DAY_WORDS = [
+    (("chủ nhật", "chu nhat", "cn"), 7),
+    (("thứ hai", "thu hai", "thứ 2", "thu 2", "t2"), 1),
+    (("thứ ba", "thu ba", "thứ 3", "thu 3", "t3"), 2),
+    (("thứ tư", "thu tu", "thứ 4", "thu 4", "t4"), 3),
+    (("thứ năm", "thu nam", "thứ 5", "thu 5", "t5"), 4),
+    (("thứ sáu", "thu sau", "thứ 6", "thu 6", "t6"), 5),
+    (("thứ bảy", "thu bay", "thứ 7", "thu 7", "t7"), 6),
+]
+
+
+def _fix_days(filters: dict, message: str) -> dict:
+    """Sửa lại available_days theo tin nhắn gốc khi user gọi tên thứ tường minh.
+
+    Chỉ can thiệp khi câu có nêu thứ cụ thể — "cuối tuần"/"trong tuần" vẫn để LLM suy luận.
+    """
+    if not message or "available_days" not in filters:
+        return filters
+    msg = message.lower()
+    found = sorted({code for words, code in _DAY_WORDS if any(w in msg for w in words)})
+    if found and filters.get("available_days") != found:
+        filters["available_days"] = found
+    return filters
