@@ -10,11 +10,11 @@ _settings = get_settings()
 
 META_COLS = "tutor_id, city, district, teaching_mode, subject_ids, grades, price_min, price_max, average_rating, total_reviews, completed_hours"
 
-# Pha 3: scoring (đã thiết kế sẵn ở migration 20260618_tutor_embeddings_add_meta.sql,
+# Pha 3: scoring
 
 # Bayesian average: kéo rating của gia sư ít review về trung bình hệ thống, tránh
 # 1 review 5 sao thắng 500 review 4.8 sao, và tránh gia sư 0 review bị coi là rating=0.
-_RATING_PRIOR_MEAN = 4.5   # trung bình rating toàn hệ thống (đo thực tế trên seed data)
+_RATING_PRIOR_MEAN = 4.5   # trung bình rating toàn hệ thống
 _RATING_PRIOR_WEIGHT = 10  # "độ tin cậy tối thiểu" — cần ~10 review mới gần sát rating thật
 
 # Trọng số blend (nhánh có query): cân bằng khớp nhu cầu (similarity) và chất lượng
@@ -98,8 +98,10 @@ def score_tutor(
 # mục tiêu, tính cách). Query nào cũng có môn/lớp nên chỉ riêng chúng KHÔNG tính là cụ thể.
 _SPECIFIC_HINTS = (
     "thạc sĩ", "thac si", "tiến sĩ", "tien si", "cử nhân", "cu nhan", "master",
+    "thủ khoa", "thu khoa", "á khoa", "a khoa", "giỏi", "xuất sắc", "xuat sac",
+    "kỹ sư", "ky su", "giáo viên", "giao vien", "trình độ", "trinh do",
     "sư phạm", "su pham", "bằng", "bang cap", "chứng chỉ", "chung chi",
-    "đại học", "dai hoc", "trường", "ielts", "toeic", "sat",
+    "đại học", "dai hoc", "trường", "ielts", "toeic", "sat", "gpa",
     "kinh nghiệm", "kinh nghiem", "mất gốc", "mat goc", "nâng cao", "nang cao",
     "luyện thi", "luyen thi", "ôn thi", "on thi", "chuyên", "chuyen",
     "kiên nhẫn", "kien nhan", "nhiệt tình", "nhiet tinh", "vui vẻ", "vui ve",
@@ -224,7 +226,9 @@ async def match_tutors(
     )
     meta_map = {r["tutor_id"]: r for r in meta_rows}
 
-    specific = _is_specific_query(query)
+    _top = sorted(raw_text.values(), reverse=True)
+    _stands_out = len(_top) >= 2 and _top[0] > 0 and _top[0] >= _top[1] * 1.3
+    specific = _is_specific_query(query) or _stands_out
     ranked_ids = sorted(
         candidate_ids,
         key=lambda tid: score_tutor(

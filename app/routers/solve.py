@@ -4,7 +4,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from typing import AsyncGenerator
-from ..models.schemas import SolveRequest
+from ..models.schemas import SolveRequest, SimilarQuestionsRequest, SimilarQuestion
 from ..services.homework import ocr, classifier, solver_stream
 from ..services.shared import rag
 from ..core.dependencies import get_embed_model, get_supabase, get_gemini_client
@@ -159,3 +159,30 @@ async def solve_endpoint(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/similar-questions", response_model=list[SimilarQuestion])
+@limiter.limit(RATE_LIMIT_PER_MINUTE)
+async def similar_questions_endpoint(
+    request: Request,
+    body: SimilarQuestionsRequest,
+    gemini=Depends(get_gemini_client),
+    sb=Depends(get_supabase),
+):
+    """Bài tương tự để luyện tập sau khi giải xong.
+    """
+    if not body.text.strip():
+        raise HTTPException(status_code=400, detail="Cần text đề bài")
+
+    rows = await rag.retrieve_similar_for_practice(
+        sb=sb, query=body.text, chapter=body.chapter, difficulty=body.difficulty,
+        exclude_ids=body.exclude_ids, top_k=body.top_k, gemini=gemini,
+    )
+    return [
+        SimilarQuestion(
+            id=r["id"], content=r["content"], solution=r.get("solution"),
+            chapter=r.get("chapter"), difficulty=r.get("difficulty"),
+            similarity=round(r.get("similarity") or 0, 4),
+        )
+        for r in rows
+    ]

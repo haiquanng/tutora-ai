@@ -1,9 +1,6 @@
 """
 Hạ tầng gọi Ranking Core (.NET /recommend) + chuẩn hoá dữ liệu, DÙNG CHUNG cho cả
 zalo_agent lẫn web_agent.
-
-Tách ra từ web_agent/tutor_chat.py (2026-07): 3 hàm này KHÔNG thuộc riêng luồng web —
-zalo_agent/agent.py cũng import chúng.
 """
 from __future__ import annotations
 
@@ -109,6 +106,16 @@ async def _fetch_candidates(context, filters, query: str) -> dict:
         "query": query or None,
         "topK": top_k,
     }
+    # Lịch rảnh: chỉ web_agent có 3 field này. getattr để luồng Zalo (TutorChatFilters cũ
+    # hoặc object khác) không đổi hành vi — không gửi field thì .NET bỏ qua, lọc như cũ.
+    days = getattr(filters, "available_days", None)
+    if days:
+        payload["availableDaysOfWeek"] = days
+    a_from = getattr(filters, "available_from", None)
+    a_to = getattr(filters, "available_to", None)
+    if a_from and a_to:
+        payload["availableFrom"] = a_from
+        payload["availableTo"] = a_to
     url = f"{_settings.dotnet_be_url}/api/tutors/recommend"
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(url, json=payload)

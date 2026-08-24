@@ -79,6 +79,10 @@ class TutorChatFilters(BaseModel):
     grade_level_id: Optional[int] = None
     # Số gia sư PH muốn xem ("cần 1-2 người" → 2). null = mặc định.
     desired_count: Optional[int] = None
+    # LỊCH RẢNH — dữ liệu có cấu trúc (bảng tutor_availability), lọc CỨNG ở SQL .NET.
+    available_days: Optional[List[int]] = None
+    available_from: Optional[str] = None   # "HH:MM"
+    available_to: Optional[str] = None     # "HH:MM"
 
 
 class ShownTutor(BaseModel):
@@ -161,6 +165,24 @@ class DirectSearchRequest(BaseModel):
 
 class DirectSearchResponse(BaseModel):
     tutors: List[Dict[str, Any]] = []
+
+
+class SimilarQuestionsRequest(BaseModel):
+    """Tìm bài tương tự để LUYỆN TẬP (khác RAG lời giải mẫu — xem rag.py)."""
+    text: str
+    chapter: Optional[str] = None
+    difficulty: Optional[str] = None
+    exclude_ids: List[str] = []
+    top_k: int = 5
+
+
+class SimilarQuestion(BaseModel):
+    id: str
+    content: str
+    solution: Optional[str] = None
+    chapter: Optional[str] = None
+    difficulty: Optional[str] = None
+    similarity: float
 
 
 class SolveRequest(BaseModel):
