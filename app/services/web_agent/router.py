@@ -16,6 +16,7 @@ của Kodee: gần 0 cho câu factual/phân loại).
 from __future__ import annotations
 
 import json
+import re
 
 from google import genai
 from google.genai import types
@@ -31,7 +32,7 @@ huynh/học sinh với GIA SƯ. Đọc lịch sử hội thoại + TIN NHẮN M�
 (không markdown, không giải thích):
 {{
   "scope": "on_topic" | "off_topic",
-  "intent": "tutor" | "consult" | "faq" | "chitchat",
+  "intent": "tutor" | "tutor_info" | "consult" | "faq" | "chitchat",
   "reply": "câu trả lời NGẮN 1-2 câu, thân thiện, tiếng Việt, bám sát tin nhắn mới",
   "suggestions": ["gợi ý bấm tiếp 1", "gợi ý 2"] (tối đa 3, [] nếu không cần),
   "filters": {{
@@ -63,6 +64,10 @@ INTENT (chỉ xét khi on_topic):
   VÍ DỤ: "Tìm gia sư Toán" (thiếu lớp) → consult: "Bé học lớp mấy để mình chọn đúng ạ?"
 - "tutor": ĐÃ có MÔN + LỚP → giới thiệu gia sư NGAY. Không cần biết ngân sách/mục tiêu mới
   được tìm; những cái đó là TÙY CHỌN, hỏi thêm SAU khi đã cho xem kết quả cũng được.
+- "tutor_info": hỏi VỀ MỘT GIA SƯ ĐÃ ĐƯỢC GỢI Ý ở lượt trước ("thầy A dạy sao?", "cô kia
+  có kinh nghiệm không?", "người đầu tiên học phí bao nhiêu?", "bằng cấp của cô ấy?").
+  Dấu hiệu: nhắc TÊN hoặc thứ tự của gia sư trong DANH SÁCH ĐÃ GỢI Ý bên dưới, và đang HỎI
+  THÔNG TIN chứ không xin danh sách mới. KHÔNG dùng khi user muốn tìm/lọc gia sư khác.
 - "faq": hỏi về HỆ THỐNG/CHÍNH SÁCH Tutora (học phí chung, cách đăng ký, quy trình, hoàn
   tiền, cam kết, an toàn, cách Tutora hoạt động) — KHÔNG nhằm tìm 1 gia sư cụ thể.
 
@@ -131,6 +136,7 @@ async def route(
     current_filters: TutorChatFilters,
     subjects: list[dict],
     grades: list[dict],
+    shown_tutors: list | None = None,
 ) -> dict:
     """1 call → {scope, intent, reply, suggestions, filters}. Fallback an toàn nếu lỗi:
     coi như on_topic/tutor để không chặn nhầm nhu cầu thật."""
@@ -142,11 +148,16 @@ async def route(
     grades_text = "\n".join(
         f'- {g["gradeName"]}: id={g["gradeLevelId"]}' for g in grades
     ) or "(không có)"
+    shown_text = "\n".join(
+        f'- {getattr(t, "name", "") or getattr(t, "tutor_id", "")}'
+        for t in (shown_tutors or [])
+    ) or "(chưa gợi ý gia sư nào)"
     prompt = (
         _ROUTER_PROMPT.format(
             subjects=subjects_text, grades=grades_text,
             current_filters=current_filters.model_dump_json(),
         )
+        + f"\n\nDANH SÁCH GIA SƯ ĐÃ GỢI Ý (dùng để nhận diện intent 'tutor_info'):\n{shown_text}"
         + f"\n\nHội thoại trước:\n{convo}"
         + f"\n\nTin nhắn mới: {message or '(chưa có, mới bắt đầu)'}"
     )
@@ -171,14 +182,14 @@ async def route(
     if scope not in ("on_topic", "off_topic"):
         scope = "on_topic"
     intent = data.get("intent")
-    if intent not in ("tutor", "consult", "faq", "chitchat"):
+    if intent not in ("tutor", "tutor_info", "consult", "faq", "chitchat"):
         intent = "chitchat"
     return {
         "scope": scope,
         "intent": intent,
         "reply": (data.get("reply") or "").strip(),
         "suggestions": (data.get("suggestions") or [])[:3],
-        "filters": _fix_days(data.get("filters") or {}, message),
+        "filters": _fix_grade(_fix_days(data.get("filters") or {}, message), message, grades),
     }
 
 
@@ -192,6 +203,36 @@ _DAY_WORDS = [
     (("thứ sáu", "thu sau", "thứ 6", "thu 6", "t6"), 5),
     (("thứ bảy", "thu bay", "thứ 7", "thu 7", "t7"), 6),
 ]
+
+
+_GRADE_RE = re.compile(
+    r"(?:lớp|lop|khối|khoi|grade)\s*(\d{1,2})"      # "lớp 11"
+    r"|(?<![\d,.])(\d{1,2})\s*(?:tuổi|tuoi)"        # "11 tuổi" → không phải lớp, loại sau
+    r"|^\s*(\d{1,2})\s*(?:[,.]|$|\s)",              # "11" hoặc "11, và..." đứng đầu câu
+    re.IGNORECASE,
+)
+
+
+def _fix_grade(filters: dict, message: str, grades: list[dict]) -> dict:
+    """Chốt grade_level_id từ tin nhắn gốc khi user nêu lớp tường minh.
+    """
+    if not message or not grades:
+        return filters
+    m = _GRADE_RE.search(message.strip().lower())
+    if not m:
+        return filters
+    # Nhóm 2 là "N tuổi" — tuổi KHÁC lớp, không được suy ra.
+    if m.group(2):
+        return filters
+    num = m.group(1) or m.group(3)
+    if not num:
+        return filters
+    want = f"lớp {int(num)}"
+    for g in grades:
+        if (g.get("gradeName") or "").strip().lower() == want:
+            filters["grade_level_id"] = g.get("gradeLevelId")
+            break
+    return filters
 
 
 def _fix_days(filters: dict, message: str) -> dict:
