@@ -1,7 +1,6 @@
 import base64
 import secrets
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from .config import get_settings
 
@@ -9,12 +8,8 @@ _DOCS_PATHS = {"/docs", "/redoc", "/openapi.json"}
 
 
 def configure_middleware(app: FastAPI) -> None:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # KHÔNG có CORSMiddleware — chủ ý.
+    # Mọi caller của service này đều là server-to-server
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
@@ -40,9 +35,6 @@ def configure_middleware(app: FastAPI) -> None:
             )
 
         if path in {"/health", "/"}:
-            return await call_next(request)
-
-        if request.method == "OPTIONS":
             return await call_next(request)
 
         key = request.headers.get("X-API-Key")
