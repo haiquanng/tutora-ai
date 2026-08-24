@@ -5,8 +5,7 @@ Kodee: RAG chống hallucination — lấy passage từ vector DB, ép LLM trả
 vào passage, temperature thấp. Rỗng → nói thật "chưa có thông tin", TUYỆT ĐỐI không bịa
 (bài học nameserver của Kodee: LLM tự tin bịa dữ liệu factual nếu không có RAG).
 
-Nguồn KB: bảng RIÊNG tutora_kb_chunks (nội dung Tutora, CEO nạp qua file upload từ CMS)
-— tách khỏi RAG môn học (rag_chunks). Xem services/knowledge/.
+Nguồn KB: bảng RIÊNG tutora_kb_chunks
 """
 from __future__ import annotations
 
@@ -54,7 +53,9 @@ def _answer_from_passages(question: str, ctx_text: str, history: list[dict]) -> 
         "Bạn là trợ lý Tutora. Trả lời câu hỏi của người dùng DỰA HOÀN TOÀN vào thông tin "
         "tham chiếu bên dưới, KHÔNG bịa thêm bất kỳ chi tiết nào ngoài đó. Nếu thông tin "
         "tham chiếu KHÔNG đủ trả lời, nói thật là chưa có thông tin và mời liên hệ hỗ trợ "
-        "Tutora. Giọng thân thiện, ngắn gọn, tiếng Việt, xưng 'mình'.\n\n"
+        "Tutora. Giọng thân thiện, ngắn gọn, tiếng Việt, xưng 'mình'.\n"
+        "TUYỆT ĐỐI KHÔNG chào hỏi/giới thiệu lại bản thân ('Chào bạn', 'mình là trợ lý "
+        "Tutora'...) — đang giữa cuộc trò chuyện, chào lại mỗi lượt rất máy móc.\n\n"
         f"THÔNG TIN THAM CHIẾU:\n{ctx_text}\n\n"
         f"{('Hội thoại gần đây:' + chr(10) + convo + chr(10) + chr(10)) if convo else ''}"
         f"Câu hỏi: {question}"

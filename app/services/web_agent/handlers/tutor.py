@@ -7,13 +7,57 @@ thật rồi map sang card (đúng nguyên tắc Kodee: function lấy data th�
 """
 from __future__ import annotations
 
+from google.genai import types
+
 from ..schemas import WebChatResponse, TutorCard
 from ..handlers.base import BaseHandler, HandlerContext
 from ...tutoring_shared.candidates import _fetch_candidates
+from ....core.dependencies import get_gemini_client
+
+_MODEL = "gemini-2.5-flash-lite"
 
 _PROFILE_PATH = "/tutor-detail/{tutor_id}"
 
 _MAX_CARDS = 2   # số card hiển thị trong 1 lượt (gọn cho bong bóng chat)
+
+
+def _follow_up_question(ctx, current_reply: str) -> str:
+    """1 câu gợi mở về tiêu chí user CHƯA nêu (giá / giới tính / lịch rảnh).
+    """
+    missing = []
+    if not (ctx.filters.min_rate or ctx.filters.max_rate):
+        missing.append("mức học phí mong muốn")
+    if not getattr(ctx.filters, "available_days", None):
+        missing.append("buổi/khung giờ học được")
+    if not ctx.filters.tutor_gender:
+        missing.append("muốn thầy hay cô")
+    if not missing:
+        return ""
+
+    prompt = (
+        "Bạn là trợ lý Tutora, vừa gửi danh sách gia sư cho phụ huynh/học sinh.\n"
+        f"Câu bạn vừa nói: \"{current_reply}\"\n\n"
+        "Viết THÊM ĐÚNG MỘT câu ngắn (tối đa 25 từ), thân thiện, tiếng Việt, xưng 'mình', "
+        "gợi mở để họ nói thêm MỘT trong các tiêu chí sau nhằm lọc sát hơn:\n"
+        + "\n".join(f"- {m}" for m in missing) +
+        "\n\nYÊU CẦU:\n"
+        "- Chỉ 1 câu, KHÔNG liệt kê hết mọi tiêu chí, chọn 1-2 cái tự nhiên nhất.\n"
+        "- Giọng mời gọi nhẹ nhàng, cho họ thoải mái BỎ QUA nếu không cần.\n"
+        "- KHÔNG lặp lại nội dung câu trên, KHÔNG chào lại, KHÔNG nhắc tên gia sư.\n"
+        "- Chỉ trả về câu đó, không giải thích."
+    )
+    try:
+        resp = get_gemini_client().models.generate_content(
+            model=_MODEL, contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.7,   # cao hơn các call khác: cần đa dạng, không lặp mỗi lượt
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        return (resp.text or "").strip().strip('"')
+    except Exception as e:
+        print(f"web tutor follow-up error: {e}")
+        return ""
 
 
 def _to_card(t: dict, is_best: bool) -> TutorCard:
@@ -99,20 +143,16 @@ class TutorHandler(BaseHandler):
                 "Tiếc là chưa có gia sư nào khớp tiêu chí này. Bạn thử nới bớt yêu cầu "
                 "(giá, môn, khu vực…) nhé?"
             )
-        elif not reply:
-            # Cho xem kết quả TRƯỚC rồi mời tinh chỉnh — thay vì chặn lại hỏi ngân sách/mục
-            # tiêu trước khi cho xem gì (hành vi "phỏng vấn thủ tục" user đã phản ánh).
-            # Chỉ mời bổ sung tiêu chí user CHƯA nêu, không hỏi lại cái đã biết.
-            reply = f"Mình tìm được {len(cards)} gia sư phù hợp:"
-            missing = []
-            if not (ctx.filters.min_rate or ctx.filters.max_rate):
-                missing.append("ngân sách")
-            if not ctx.filters.tutor_gender:
-                missing.append("giới tính gia sư")
-            if missing:
-                reply += (
-                    f" Bạn muốn lọc sát hơn theo {' hoặc '.join(missing)} thì cho mình biết nhé."
-                )
+        else:
+            if not reply:
+                reply = f"Mình tìm được {len(cards)} gia sư phù hợp:"
+            # Cho xem kết quả TRƯỚC rồi mới gợi mở thêm — KHÔNG chặn lại phỏng vấn trước khi
+            # cho xem gì. Hỏi đúng 1 tiêu chí user CHƯA nêu; trả lời hay không đều được, kết
+            # quả đã có sẵn ở trên. LLM diễn đạt để câu hỏi tự nhiên và đổi theo ngữ cảnh,
+            # thay vì ghép chuỗi cứng nghe như biểu mẫu.
+            follow_up = _follow_up_question(ctx, reply)
+            if follow_up:
+                reply = f"{reply.rstrip()} {follow_up}"
 
         return WebChatResponse(
             reply=reply, intent="tutor", cards=cards,
