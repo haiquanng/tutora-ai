@@ -1,5 +1,5 @@
 """
-Web agent — điều phối chatbot tự do 3 mục đích cho Tutora-FE (thay tutor_chat.py cũ).
+Web agent — điều phối chatbot tự do 3 mục đích cho Tutora-FE
 
 Kiến trúc theo pattern Kodee (guardrail → router → specialized handler), 
 
@@ -19,15 +19,16 @@ from .handlers.base import HandlerContext
 from .handlers.tutor import TutorHandler
 from .handlers.faq import FaqHandler
 from .handlers.chitchat import ChitchatHandler
-from .handlers.consult import ConsultHandler
+from .handlers.consult import ConsultHandler, ASKED_MARK as _ASKED_MARK
+from .handlers.tutor_info import TutorInfoHandler
 from ..tutoring_shared.candidates import _get_subjects, _get_grades
-from ...models.schemas import TutorChatFilters
+from ...models.schemas import TutorChatFilters, ShownTutor
 
-# Đăng ký handler theo intent (Kodee: agent_router map label → handler). Thêm handler mới
-# (booking, gói học...) chỉ cần thêm 1 dòng ở đây + 1 file trong handlers/.
+# Đăng ký handler theo intent (Kodee: agent_router map label → handler).
 _HANDLERS = {
     "tutor": TutorHandler(),
     "consult": ConsultHandler(),
+    "tutor_info": TutorInfoHandler(),
     "faq": FaqHandler(),
     "chitchat": ChitchatHandler(),
 }
@@ -36,17 +37,12 @@ _HANDLERS = {
 # Sentinel router dùng để XOÁ 1 filter (khác null = "không nhắc, giữ nguyên").
 _CLEAR = "__clear__"
 
-# Ngưỡng coi tin nhắn là "đoạn văn dán vào" chứ không phải câu yêu cầu. Câu tìm gia sư thật
-# hiếm khi dài quá mức này ("mình cần gia sư Toán lớp 12, ưu tiên thạc sĩ, dưới 300k" ~70 ký tự).
+# Ngưỡng coi tin nhắn là "đoạn văn dán vào" chứ không phải câu yêu cầu.
 _LONG_MESSAGE_CHARS = 220
 
 
 def _merge_filters(prev: TutorChatFilters, new: dict) -> TutorChatFilters:
     """Tích luỹ state: giữ giá trị cũ, chỉ override field router vừa trích (non-null).
-
-    Sentinel "__clear__": user BỎ một tiêu chí ("bỏ giới hạn giá", "môn nào cũng được")
-    — null nghĩa là "không nhắc, giữ nguyên", nên cần đường riêng để XOÁ, không thì filter
-    dính vĩnh viễn (bug: đổi sang Tiếng Anh vẫn còn max_rate của lượt hỏi Toán).
     """
     merged = prev.model_dump()
     for k, v in new.items():
@@ -66,7 +62,8 @@ async def web_chat(body: WebChatRequest) -> WebChatResponse:
     prev = body.current_filters or TutorChatFilters()
 
     # (2) Router: 1 call phân scope + intent + trích filter (gồm lớp) + reply.
-    routed = await router_mod.route(history, body.message, prev, subjects, grades)
+    routed = await router_mod.route(history, body.message, prev, subjects, grades,
+                                    shown_tutors=body.shown_tutors)
 
     # (3) Guardrail: off-topic → từ chối, dừng ngay.
     if guardrail.is_off_topic(routed["scope"]):
@@ -78,21 +75,8 @@ async def web_chat(body: WebChatRequest) -> WebChatResponse:
 
     filters = _merge_filters(prev, routed["filters"])
 
-    # (3b) Chống "hỏi thủ tục": ĐỦ môn + lớp là đủ để tìm → ép sang tutor dù LLM còn muốn
-    # hỏi thêm. Prompt một mình không đủ tin cậy (LLM hay hỏi lại cho "đúng quy trình"),
-    # mà hỏi lại điều user ĐÃ nói là lỗi nặng nhất về trải nghiệm. Code chốt, không phải prompt.
     intent = routed["intent"]
 
-    # (3a) Tin nhắn KHÔNG PHẢI yêu cầu tìm gia sư: user dán 1 đoạn văn/mô tả dài (bio gia sư,
-    # bài viết...). LLM dễ "nhập vai" theo đoạn text đó hoặc vờ đã hiểu rồi bắn card. Chặn
-    # bằng code: text dài mà router KHÔNG trích được tiêu chí mới nào → hỏi lại cho rõ.
-    # Guard phải ĐỘC LẬP với router: đo trên chính tin nhắn, không tin intent/filter của LLM.
-    #  - filter: dán bio "gia sư Tiếng Anh lớp 7-8" → router trích subject_id=2 từ đoạn text
-    #    đó (môn của người trong bài viết, KHÔNG phải nhu cầu người hỏi).
-    #  - intent: có history "đang tìm Tiếng Anh" thì router luôn cho "tutor" (đo 5/5 lần),
-    #    vì nó tưởng user đang tiếp tục mạch cũ.
-    # Dấu hiệu tin cậy nhất là hình dạng tin nhắn: dài + văn phong người viết TỰ GIỚI THIỆU
-    # (ngôi thứ nhất, lời mời liên hệ) → chắc chắn không phải câu yêu cầu tìm gia sư.
     _msg = (body.message or "").strip()
     _selfintro_hits = sum(
         1 for kw in ("mình là", "tôi là", "mình sẽ giúp", "phương pháp của tôi",
@@ -110,21 +94,35 @@ async def web_chat(body: WebChatRequest) -> WebChatResponse:
             suggestions=[],
         )
 
+    # Điều kiện ĐỦ để giới thiệu gia sư: có MÔN + LỚP (bắt buộc) VÀ ít nhất 1 tiêu chí nữa
+    # (giá / giới tính / lịch rảnh / số lượng).
+    has_subject = bool(filters.subject_id or body.context.subject_id)
+    has_grade = bool(filters.grade_level_id or body.context.grade_level_id)
+    extra = sum(1 for v in (
+        filters.min_rate, filters.max_rate, filters.tutor_gender,
+        getattr(filters, "available_days", None), filters.desired_count,
+    ) if v)
+    enough = has_subject and has_grade and extra >= 1
+
+    # Gate "hỏi đúng 1 lần"
+    asked_before = any(
+        m.get("role") == "assistant" and _ASKED_MARK in (m.get("content") or "")
+        for m in history
+    )
+
     if intent == "consult":
-        has_subject = bool(filters.subject_id or body.context.subject_id)
-        has_grade = bool(filters.grade_level_id or body.context.grade_level_id)
-        # CHỈ ép khi router trích được tiêu chí MỚI từ chính tin nhắn này. Nếu không, đây là
-        # câu router KHÔNG hiểu (user dán 1 đoạn text lạ, hỏi lan man...) mà filter cũ vẫn
-        # còn môn+lớp từ lượt trước → ép sang tutor sẽ thành "không hiểu gì vẫn bắn card".
-        # Để nguyên consult cho router hỏi lại — đó mới là hành vi đúng.
         said_something = any(v is not None for v in (routed["filters"] or {}).values())
-        if has_subject and has_grade and said_something:
+        if has_subject and has_grade and said_something and (enough or asked_before):
             intent = "tutor"
             # Câu router sinh là câu HỎI (nó tưởng còn consult) — giữ lại sẽ thành
-            # "hỏi thêm nhưng vẫn bắn card". Bỏ đi để TutorHandler tự sinh câu dẫn kết quả.
+            # "hỏi thêm nhưng vẫn bắn card".
             router_reply = ""
         else:
             router_reply = routed["reply"]
+    elif intent == "tutor" and not enough and not asked_before:
+        # Router muốn bắn card khi mới có môn+lớp → chặn lại, hỏi thêm 1 câu trước.
+        intent = "consult"
+        router_reply = ""
     else:
         router_reply = routed["reply"]
 
@@ -136,6 +134,13 @@ async def web_chat(body: WebChatRequest) -> WebChatResponse:
         filters=filters,
         router_reply=router_reply,
         suggestions=routed["suggestions"],
+        shown_tutors=body.shown_tutors,
     )
     handler = _HANDLERS[intent]
-    return await handler.handle(ctx)
+    resp = await handler.handle(ctx)
+
+    if resp.cards:
+        resp.shown_tutors = [ShownTutor(tutor_id=c.tutor_id, name=c.name) for c in resp.cards]
+    else:
+        resp.shown_tutors = body.shown_tutors
+    return resp

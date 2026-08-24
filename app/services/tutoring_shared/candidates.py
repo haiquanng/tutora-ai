@@ -84,6 +84,20 @@ def _gender_to_int(gender) -> int | None:
     return _GENDER_TO_INT.get(str(gender).strip().lower())
 
 
+# GIỜ VN → UTC
+# tutor_availability lưu giờ UTC
+_VN_OFFSET_HOURS = 7
+
+
+def _vn_to_utc(hhmm: str) -> tuple[str, int]:
+    try:
+        h, m = int(hhmm[:2]), int(hhmm[3:5])
+    except (ValueError, IndexError):
+        return hhmm, 0
+    total = h - _VN_OFFSET_HOURS
+    return f"{total % 24:02d}:{m:02d}", (1 if total < 0 else 0)
+
+
 # GỌI RANKING CORE (.NET /recommend)
 async def _fetch_candidates(context, filters, query: str) -> dict:
     """Gọi .NET recommend (POST /api/tutors/recommend) — filter SQL + profile + rerank.
@@ -114,8 +128,10 @@ async def _fetch_candidates(context, filters, query: str) -> dict:
     a_from = getattr(filters, "available_from", None)
     a_to = getattr(filters, "available_to", None)
     if a_from and a_to:
-        payload["availableFrom"] = a_from
-        payload["availableTo"] = a_to
+        payload["availableFrom"], carry_from = _vn_to_utc(a_from)
+        payload["availableTo"], _ = _vn_to_utc(a_to)
+        if carry_from and days:
+            payload["availableDaysOfWeek"] = [(d - 2) % 7 + 1 for d in days]
     url = f"{_settings.dotnet_be_url}/api/tutors/recommend"
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(url, json=payload)

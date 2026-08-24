@@ -15,6 +15,7 @@ from app.models.schemas import TutorChatFilters
 SUBJECT_VAT_LY = 3
 GRADE_LOP_9 = 57
 SAT_EVENING = ([6], "18:00", "21:00")   # tối Thứ 7
+SAT_EVENING_UTC = ("11:00", "14:00")
 
 
 def _tutors_free(day: int, start: str, end: str) -> set[str]:
@@ -65,7 +66,7 @@ def test_ket_qua_chi_gom_gia_su_that_su_ranh():
     from app.models.schemas import TutorChatContext
 
     days, start, end = SAT_EVENING
-    expected = _tutors_free(days[0], start, end)
+    expected = _tutors_free(days[0], *SAT_EVENING_UTC)
     if not expected:
         pytest.skip("Không có dữ liệu lịch cho khung này")
 

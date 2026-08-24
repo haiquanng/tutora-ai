@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Optional, List, Literal
 from pydantic import BaseModel, field_validator
 
-from ...models.schemas import HistoryMessage, TutorChatContext, TutorChatFilters
+from ...models.schemas import HistoryMessage, TutorChatContext, TutorChatFilters, ShownTutor
 
 
 class WebChatRequest(BaseModel):
@@ -20,6 +20,7 @@ class WebChatRequest(BaseModel):
     context: TutorChatContext = TutorChatContext()
     # Filter tích luỹ qua các lượt (FE giữ & gửi lại) — merge, không reset.
     current_filters: Optional[TutorChatFilters] = None
+    shown_tutors: List[ShownTutor] = []
 
     # FE/.NET gửi `context: null` tường minh khi chưa có ngữ cảnh — default chỉ áp dụng
     # khi field VẮNG, không phải khi = null → Pydantic reject (422). Coerce null → default.
@@ -52,9 +53,10 @@ class WebChatResponse(BaseModel):
     # scope='off_topic' → reply là câu từ chối lịch sự, cards rỗng.
     # intent='tutor' → cards có dữ liệu; intent='faq' → reply là câu trả lời RAG;
     # intent='chitchat' → chào hỏi; intent='consult' → đang tư vấn hỏi thêm nhu cầu (chưa card).
-    intent: Literal["tutor", "consult", "faq", "off_topic", "chitchat"] = "tutor"
+    intent: Literal["tutor", "tutor_info", "consult", "faq", "off_topic", "chitchat"] = "tutor"
     cards: List[TutorCard] = []
     filters: TutorChatFilters = TutorChatFilters()
     ai_ranked: bool = False
     # Gợi ý câu hỏi tiếp theo cho user bấm (đổi môn, hỏi thêm...) — giống Zalo suggestions.
     suggestions: List[str] = []
+    shown_tutors: List[ShownTutor] = []
