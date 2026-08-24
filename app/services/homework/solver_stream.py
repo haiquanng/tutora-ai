@@ -1,4 +1,5 @@
 import asyncio
+import re
 from typing import Optional, List, AsyncGenerator
 from google import genai
 from google.genai import types
@@ -10,6 +11,7 @@ from ...utils.prompt import (
     CANVAS_CLOSE,
     _CANVAS_CONTENT_RULE,
     build_solve_prompt_v2,
+    build_proficiency_block,
 )
 from .step_segmenter import segment_steps
 
@@ -152,6 +154,41 @@ class _CanvasSplitter:
         return [("canvas" if self._in_canvas else "chat", piece)]
 
 
+# Gần trùng khít mới được mang nhãn "đã kiểm chứng từ gia sư".
+_VERIFIED_SIMILARITY = 0.97
+
+_LEAK_PATTERNS = re.compile(
+    r"(?i)(sympy|wait,|let me (re)?(check|verify|calculate)|i made a mistake|"
+    r"kết quả từ (sympy|python|công cụ)|dùng (sympy|công cụ tính toán)|"
+    r"(mình|thầy/cô) (đã )?(tính|nhầm) sai)"
+)
+
+
+class _LeakFilter:
+    """Bỏ những DÒNG nhắc tới công cụ nội bộ. Gom theo dòng vì chunk hay cắt ngang câu."""
+
+    def __init__(self) -> None:
+        self._buf = ""
+
+    def feed(self, text: str) -> str:
+        self._buf += text
+        if "\n" not in self._buf:
+            return ""
+        # Giữ phần sau \n cuối: dòng đó có thể chưa viết xong.
+        head, _, self._buf = self._buf.rpartition("\n")
+        return self._clean(head + "\n")
+
+    def flush(self) -> str:
+        piece, self._buf = self._buf, ""
+        return self._clean(piece)
+
+    @staticmethod
+    def _clean(text: str) -> str:
+        return "".join(
+            line for line in text.splitlines(keepends=True) if not _LEAK_PATTERNS.search(line)
+        )
+
+
 def _classify_part(part) -> tuple[str, str]:
     """
     Phân loại 1 part trong stream -> (kind, text).
@@ -227,7 +264,11 @@ async def solve_stream(
         # xem _CANVAS_CONTENT_RULE. Không ảnh hưởng câu trả lời chat thường.
         system = TUTOR_SYSTEM_V2 + _CANVAS_CONTENT_RULE if want_steps else TUTOR_SYSTEM_V2
     else:
-        current_prompt = question
+        # Câu hỏi thường cũng cần biết học sinh là ai: "em đang yếu phần nào?",
+        # "trình độ em tới đâu?" — trước đây nhánh này bỏ qua hồ sơ nên Tutora trả lời
+        # "không có khả năng đánh giá trình độ" dù dữ liệu nằm sẵn trong request.
+        prof_block = build_proficiency_block(proficiency)
+        current_prompt = f"{prof_block}\n\n[HỌC SINH HỎI]\n{question}" if prof_block else question
         system = CHAT_SYSTEM
 
     solve_contents = history_contents + [
@@ -308,14 +349,28 @@ async def solve_stream(
             sent_steps = len(complete)
         return extra
 
+    # None = chưa có kết luận (bài hình/chứng minh không chạy code được).
+    verified = None
+    leak_filter = _LeakFilter()
+
     while True:
         item = await solve_q.get()
         if item is None:
             break
         kind, text = item
 
-        # Code execution VẪN chạy (né malformed) nhưng KHÔNG stream ra client.
+        # Code Gemini tự sinh không stream ra client, nhưng kết quả chạy thì GIỮ
+        # lại làm tín hiệu tin cậy. code_err chỉ hạ verified khi chưa từng chạy trơn.
         if kind in ("code", "code_ok", "code_err"):
+            if kind == "code_ok":
+                verified = True
+            elif kind == "code_err" and verified is None:
+                verified = False
+            continue
+
+        # Lọc TRƯỚC splitter -> phủ cả nhánh chat lẫn canvas.
+        text = leak_filter.feed(text)
+        if not text:
             continue
 
         if canvas_splitter is None:
@@ -331,6 +386,18 @@ async def solve_stream(
                 if "steps" in chunk:
                     yield chunk
 
+    # Dòng cuối chưa có \n vẫn nằm trong bộ lọc -> xả nốt.
+    tail = leak_filter.flush()
+    if tail:
+        if canvas_splitter is None:
+            yield {"id": message_id, "session_id": session_id, "delta": tail, "done": False}
+        else:
+            for piece_kind, piece in canvas_splitter.feed(tail):
+                if piece_kind == "chat":
+                    yield {"id": message_id, "session_id": session_id, "delta": piece, "done": False}
+                else:
+                    _canvas_progress(piece)
+
     if canvas_splitter is not None:
         for piece_kind, piece in canvas_splitter.flush():
             if piece_kind == "chat":
@@ -340,13 +407,23 @@ async def solve_stream(
 
     await solve_future
 
-    rag_used = bool(rag_chunks) or bool(bank_matches)
+    # Nhãn tin cậy trên UI. Tách bank (gia sư đã duyệt) khỏi rag_chunks: chỉ bank mới
+    # được phép nói "đã kiểm chứng", và chỉ khi gần trùng khít — 0.78 là bài TƯƠNG TỰ,
+    # gắn nhãn kiểm chứng cho nó là nói sai với học sinh.
+    top_match = max(bank_matches or [], key=lambda m: m.get("similarity") or 0, default=None)
+    top_similarity = (top_match or {}).get("similarity") or 0.0
     done_chunk = {
         "id": message_id,
         "session_id": session_id,
         "delta": "",
         "done": True,
-        "rag_used": rag_used,
+        "rag_used": bool(rag_chunks) or bool(bank_matches),
+        "bank_verified": top_similarity >= _VERIFIED_SIMILARITY,
+        "bank_similarity": round(top_similarity, 4) if bank_matches else None,
+        # id câu gốc -> UI mở thẳng bài đã duyệt để học sinh đối chiếu.
+        "bank_question_id": (top_match or {}).get("id") if bank_matches else None,
+        # None = không kết luận được (bài hình/chứng minh) -> UI không hiện gì.
+        "verified": verified,
     }
     if want_steps:
         # Chốt bằng danh sách ĐẦY ĐỦ: client thay thế toàn bộ, tránh lệch nếu có

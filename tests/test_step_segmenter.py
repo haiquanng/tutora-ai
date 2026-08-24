@@ -271,8 +271,8 @@ def test_chat_thuong_khong_co_thinking():
 
 
 def test_code_execution_khong_lo_ra_client():
-    """Code execution VẪN chạy (giúp đáp số đúng) nhưng KHÔNG stream ra client:
-    đã bỏ hiển thị 'kiểm tra bằng máy tính'. Không có delta code, không có field verify."""
+    """Code Gemini sinh KHÔNG stream ra client, nhưng kết quả chạy thành tín hiệu
+    verified ở done — UI dùng để gắn nhãn tin cậy."""
     chunks = [
         _chunk([_exec_code("print(2+3)")]),
         _chunk([_exec_result("OUTCOME_OK", "5")]),
@@ -282,4 +282,48 @@ def test_code_execution_khong_lo_ra_client():
     deltas = "".join(c.get("delta", "") for c in out)
     assert "print(" not in deltas and "5" in deltas
     assert all("verify" not in c for c in out)
-    assert all("verified" not in c for c in out)
+
+    done = [c for c in out if c.get("done")][-1]
+    assert done["verified"] is True
+
+
+def test_code_loi_thi_verified_false():
+    """Code chạy lỗi -> verified=False để UI hiện 'mình chưa chắc chắn'."""
+    chunks = [
+        _chunk([_exec_code("1/0")]),
+        _chunk([_exec_result("OUTCOME_FAILED", "ZeroDivisionError")]),
+        _chunk([_text_part("**Đáp án: $5$**")]),
+    ]
+    done = [c for c in _collect("markdown", chunks=chunks) if c.get("done")][-1]
+    assert done["verified"] is False
+
+
+def test_khong_chay_code_thi_verified_none():
+    """Bài hình/chứng minh không chạy code -> verified=None, UI không hiện nhãn nào."""
+    done = [c for c in _collect("markdown", chunks=[_text_part("Chứng minh xong.")])
+            if c.get("done")][-1]
+    assert done["verified"] is None
+    assert done["bank_verified"] is False
+    assert done["bank_similarity"] is None
+
+
+def test_khong_lo_doc_thoai_ve_cong_cu():
+    """Model lỡ kể về SymPy / tự sửa sai bằng tiếng Anh -> lọc trước khi tới học sinh."""
+    chunks = [
+        _chunk([_text_part("**Đáp án: $x=2$**\n")]),
+        _chunk([_text_part("Kết quả từ SymPy là x=2.\n")]),
+        _chunk([_text_part("Wait, I made a mistake in the final answer.\n")]),
+        _chunk([_text_part("**Bước 1: Tính delta**\n")]),
+    ]
+    deltas = "".join(c.get("delta", "") for c in _collect("markdown", chunks=chunks))
+    assert "SymPy" not in deltas
+    assert "Wait" not in deltas
+    assert "Đáp án" in deltas and "Bước 1" in deltas
+
+
+def test_dong_cuoi_khong_co_newline_van_toi_client():
+    """Dòng cuối chưa xuống dòng vẫn phải được xả ra, không bị bộ lọc nuốt mất."""
+    deltas = "".join(
+        c.get("delta", "") for c in _collect("markdown", chunks=[_text_part("Kết quả là $x=5$")])
+    )
+    assert "x=5" in deltas
