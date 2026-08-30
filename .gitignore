@@ -18,6 +18,7 @@ build/
 venv/
 .venv/
 env/
+.env.bak
 
 # Model cache (sentence-transformers downloads here)
 .cache/
@@ -46,3 +47,4 @@ scripts/
 
 # Documentation
 docs/
+.env.bak

@@ -3,9 +3,11 @@
 Field alias theo camelCase vì .NET serialize camelCase — FE lấy nguyên payload từ
 BE /analysis-input rồi đẩy sang đây, không phải map lại từng field.
 """
+from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from typing_extensions import Annotated
 
 
 def _camel(s: str) -> str:
@@ -72,8 +74,118 @@ class AnalysisInput(_CamelModel):
     difficulty_stats: list[DifficultyStat] = Field(default_factory=list)
 
 
+# Schema Gemini phải trả
+# Enum để BẢN THÂN model bị ràng buộc chỉ sinh được các giá trị này (response_schema),
+# thay vì prompt "xin" rồi hy vọng. Từng gặp model trả 'weak' thay 'gap'
+
+
+def _lenient_enum(enum: type[Enum]):
+    """Giá trị ngoài enum -> None thay vì lỗi validate.
+    """
+
+    def _parse(value: Any) -> Any:
+        if value is None or isinstance(value, enum):
+            return value
+        try:
+            return enum(value)
+        except (ValueError, TypeError):
+            return None
+
+    return BeforeValidator(_parse)
+
+
+class Level(str, Enum):
+    beginner = "beginner"
+    developing = "developing"
+    proficient = "proficient"
+    advanced = "advanced"
+
+
+class Confidence(str, Enum):
+    low = "low"
+    medium = "medium"
+    high = "high"
+
+
+class Severity(str, Enum):
+    minor = "minor"
+    moderate = "moderate"
+    critical = "critical"
+
+
+class Verdict(str, Enum):
+    solid = "solid"
+    shaky = "shaky"
+    gap = "gap"
+
+
+class ChapterNote(BaseModel):
+    chapter: str
+    chapter_slug: Optional[str] = Field(default=None, alias="chapterSlug")
+    note: str = ""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class WeaknessNote(ChapterNote):
+    severity: Annotated[Optional[Severity], _lenient_enum(Severity)] = None
+
+
+class ImproveItem(BaseModel):
+    title: str
+    why: str = ""
+
+
+def _valid_improve(v: Any) -> Any:
+    """Bỏ dạng bài hỏng, giữ cả chương: mất 1 gợi ý còn hơn mất chương khỏi mindmap."""
+    if not isinstance(v, list):
+        return []
+    out = []
+    for row in v:
+        if isinstance(row, ImproveItem):
+            out.append(row)
+        elif isinstance(row, dict) and isinstance(row.get("title"), str) and row["title"].strip():
+            out.append(row)
+    return out
+
+
+class ChapterMastery(ChapterNote):
+    correct: int = 0
+    total: int = 0
+    verdict: Annotated[Optional[Verdict], _lenient_enum(Verdict)] = None
+    summary: str = ""
+    improve: Annotated[list[ImproveItem], BeforeValidator(_valid_improve)] = Field(default_factory=list)
+
+
+class PathStep(ChapterNote):
+    order: int = 0
+    goal: str = ""
+    why: str = ""
+    # Lọc phần tử rác thay vì bỏ cả bước: mất 1 gợi ý luyện tập còn hơn mất cả bước lộ trình.
+    practice: Annotated[list[str], BeforeValidator(
+        lambda v: [x for x in v if isinstance(x, str) and x.strip()] if isinstance(v, list) else []
+    )] = Field(default_factory=list)
+    estimated_sessions: Optional[int] = Field(default=None, alias="estimatedSessions")
+
+
+class AnalysisSchema(BaseModel):
+    """Hình dạng JSON truyền cho Gemini qua response_schema (camelCase như prompt)."""
+    level: Annotated[Optional[Level], _lenient_enum(Level)] = None
+    summary: str = ""
+    confidence: Annotated[Optional[Confidence], _lenient_enum(Confidence)] = None
+    strengths: list[ChapterNote] = Field(default_factory=list)
+    weaknesses: list[WeaknessNote] = Field(default_factory=list)
+    chapterMastery: list[ChapterMastery] = Field(default_factory=list)
+    recommendedPath: list[PathStep] = Field(default_factory=list)
+    nextAction: str = ""
+
+
 class AnalysisOutput(BaseModel):
-    """Kết quả AI. FE ghi ngược về BE /analysis (strengths/weaknesses/path stringify)."""
+    """Kết quả AI. FE ghi ngược về BE /analysis (strengths/weaknesses/path stringify).
+
+    Vẫn là list[dict] vì .NET/FE ăn nguyên khối JSON; nhưng các dict này đã đi qua
+    validate của AnalysisSchema trong analyzer._coerce, không còn là dữ liệu thô.
+    """
     level: Optional[str] = None
     summary: str = ""
     confidence: Optional[str] = None

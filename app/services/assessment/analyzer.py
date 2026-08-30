@@ -6,18 +6,25 @@ chương + độ khó, không phải từ mốc điểm.
 """
 import json
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from google.genai import types
+from pydantic import BaseModel, ValidationError
 
-from ...models.assessment import AnalysisInput, AnalysisOutput
+from ...models.assessment import (
+    AnalysisInput,
+    AnalysisOutput,
+    AnalysisSchema,
+    ChapterMastery,
+    ChapterNote,
+    PathStep,
+    WeaknessNote,
+)
 
 logger = logging.getLogger(__name__)
 
 _MODEL = "gemini-2.5-flash"
 
-# 4 mức khớp ProficiencyLevel bên .NET — trả mức lạ là DB reject.
-_LEVELS = ("beginner", "developing", "proficient", "advanced")
 
 _DIFFICULTY_VI = {
     "NHAN_BIET": "Nhận biết",
@@ -175,35 +182,70 @@ def _strip_fence(text: str) -> str:
     return t.strip()
 
 
+def _validate(raw: dict[str, Any], inp: AnalysisInput) -> AnalysisSchema:
+    """Ép output model về đúng schema
+    """
+    try:
+        return AnalysisSchema.model_validate(raw)
+    except ValidationError as e:
+        logger.warning(
+            "AI trả JSON lệch schema cho attempt %s (%d lỗi) — lọc từng mục.",
+            inp.attempt_id, e.error_count(),
+        )
+
+    def _rows(model: type[BaseModel], raw_rows: Any) -> list[Any]:
+        """Validate từng phần tử, bỏ phần tử hỏng thay vì bỏ cả mảng."""
+        if not isinstance(raw_rows, list):
+            return []
+        out = []
+        for row in raw_rows:
+            try:
+                out.append(model.model_validate(row))
+            except ValidationError:
+                logger.warning("Bỏ 1 mục %s hỏng (attempt %s): %r", model.__name__, inp.attempt_id, row)
+        return out
+
+    # level/confidence: enum lenient ở model đã lo, truyền thẳng.
+    return AnalysisSchema(
+        level=raw.get("level"),
+        summary=raw.get("summary") if isinstance(raw.get("summary"), str) else "",
+        confidence=raw.get("confidence"),
+        strengths=_rows(ChapterNote, raw.get("strengths")),
+        weaknesses=_rows(WeaknessNote, raw.get("weaknesses")),
+        chapterMastery=_rows(ChapterMastery, raw.get("chapterMastery")),
+        recommendedPath=_rows(PathStep, raw.get("recommendedPath")),
+        nextAction=raw.get("nextAction") if isinstance(raw.get("nextAction"), str) else "",
+    )
+
+
 def _coerce(raw: dict[str, Any], inp: AnalysisInput) -> dict[str, Any]:
-    """Chuẩn hoá output model về đúng hợp đồng .NET.
+    """Validate + chuẩn hoá output model về đúng chuẩn .NET.
 
     Level lạ -> None: .NET giữ mức cũ của profile thay vì ghi giá trị DB reject.
     """
-    level = raw.get("level")
-    if level not in _LEVELS:
-        logger.warning("AI trả level lạ %r cho attempt %s — bỏ.", level, inp.attempt_id)
-        level = None
+    data = _validate(raw, inp)
+
+    if data.level is None:
+        logger.warning("AI không trả level dùng được cho attempt %s — bỏ.", inp.attempt_id)
 
     # Chỉ giữ chương thật có trong đề — chặn model bịa chương.
     known = {c.chapter_name for c in inp.chapter_stats if c.chapter_name}
-    def _filter(rows: Any) -> list[dict]:
-        if not isinstance(rows, list):
-            return []
+
+    def _dump(rows: list[Any]) -> list[dict]:
         # Không có chương nào gắn thì thôi không lọc (đề chưa gắn chương).
-        if not known:
-            return [r for r in rows if isinstance(r, dict)]
-        return [r for r in rows if isinstance(r, dict) and r.get("chapter") in known]
+        keep = [r for r in rows if not known or r.chapter in known]
+        # by_alias: FE/.NET đọc camelCase (chapterSlug, estimatedSessions).
+        return [r.model_dump(by_alias=True, mode="json") for r in keep]
 
     return {
-        "level": level,
-        "summary": raw.get("summary") or "",
-        "confidence": raw.get("confidence"),
-        "strengths": _filter(raw.get("strengths")),
-        "weaknesses": _filter(raw.get("weaknesses")),
-        "chapter_mastery": _filter(raw.get("chapterMastery")),
-        "recommended_path": _filter(raw.get("recommendedPath")),
-        "next_action": raw.get("nextAction"),
+        "level": data.level.value if data.level else None,
+        "summary": data.summary,
+        "confidence": data.confidence.value if data.confidence else None,
+        "strengths": _dump(data.strengths),
+        "weaknesses": _dump(data.weaknesses),
+        "chapter_mastery": _dump(data.chapterMastery),
+        "recommended_path": _dump(data.recommendedPath),
+        "next_action": data.nextAction or None,
     }
 
 
@@ -213,6 +255,8 @@ async def analyze(client, inp: AnalysisInput) -> AnalysisOutput:
         temperature=0.3,
         system_instruction=SYSTEM,
         response_mime_type="application/json",
+        # Ràng buộc chính model chỉ sinh được đúng hình dạng + đúng enum
+        response_schema=AnalysisSchema,
     )
 
     response = await client.aio.models.generate_content(
