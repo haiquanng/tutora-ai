@@ -3,6 +3,8 @@ from functools import lru_cache
 
 class Settings(BaseSettings):
     gemini_api_key: str
+    # Key RIÊNG cho tính năng lớp học
+    gemini_classroom_key: str = ""
     supabase_url: str
     supabase_key: str
     supabase_dev_url: str = ""

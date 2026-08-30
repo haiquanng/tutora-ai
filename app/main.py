@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
-from .routers import health, solve, recommend, assistant, agent, embed, extract, knowledge, assessment
+from .routers import health, solve, recommend, assistant, agent, embed, extract, knowledge, assessment, classroom
 from .core.middleware import configure_middleware
 from .core.openapi import configure_openapi
 from .core.limiter import limiter
@@ -38,3 +38,4 @@ app.include_router(embed.router, tags=["embed"])
 app.include_router(extract.router, tags=["extract"])
 app.include_router(knowledge.router, tags=["knowledge"])
 app.include_router(assessment.router, tags=["assessment"])
+app.include_router(classroom.router, tags=["classroom"])

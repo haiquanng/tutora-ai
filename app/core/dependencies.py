@@ -31,3 +31,11 @@ def get_supabase_dev() -> Client | None:
 def get_gemini_client() -> genai.Client:
     settings = get_settings()
     return genai.Client(api_key=settings.gemini_api_key)
+
+
+@lru_cache()
+def get_classroom_gemini_client() -> genai.Client:
+    """Client cho tính năng lớp học (trích tài liệu, sinh bài tập).
+    """
+    settings = get_settings()
+    return genai.Client(api_key=settings.gemini_classroom_key or settings.gemini_api_key)
