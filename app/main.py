@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
@@ -5,12 +7,21 @@ from .routers import health, solve, recommend, assistant, agent, embed, extract,
 from .core.middleware import configure_middleware
 from .core.openapi import configure_openapi
 from .core.limiter import limiter
+from .services.telemetry import usage as usage_telemetry
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    yield
+    # Đẩy nốt số liệu token còn trong hàng đợi trước khi tắt (usage gửi theo lô).
+    await usage_telemetry.flush()
 
 
 app = FastAPI(
     title="Tutora AI",
     description="Tutor AI API",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 app.state.limiter = limiter
