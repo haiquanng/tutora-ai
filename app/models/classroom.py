@@ -8,6 +8,8 @@ class MaterialExtractResponse(BaseModel):
     full_text: str = ""
     page_count: Optional[int] = None
     error: Optional[str] = None
+    relevant: Optional[bool] = None
+    reject_reason: Optional[str] = None
 
 
 class MaterialSource(BaseModel):
