@@ -2,9 +2,12 @@
 Unit test cho classroom/ — bài tập nhanh trong buổi học.
 Thuần, không gọi Gemini/DB, tất định.
 """
+import asyncio
+
 import fitz
 import pytest
 
+from app.services.classroom.classify import check_relevance
 from app.services.classroom.extract import extract_pdf_text, detect_kind
 from app.services.classroom.generate import (
     build_documents_block,
@@ -15,8 +18,7 @@ from app.services.classroom.generate import (
 )
 
 
-# ── Trích xuất ───────────────────────────────────────────────────────────────
-
+# Trích xuất
 def _make_pdf(pages: list[str]) -> bytes:
     doc = fitz.open()
     for text in pages:
@@ -60,8 +62,7 @@ def test_detect_kind():
     assert detect_kind("upload", "application/pdf") == "pdf"
 
 
-# ── Dựng khối tài liệu ───────────────────────────────────────────────────────
-
+# Dựng khối tài liệu
 def test_nhan_nguon_mang_material_id_that():
     """Nhãn phải có material_id THẬT: đánh số 1,2,3 thì AI trả số thứ tự -> BE map sai."""
     block, truncated = build_documents_block([
@@ -84,8 +85,7 @@ def test_cat_bot_khi_qua_dai():
     assert len(block) <= MAX_CONTEXT_CHARS + 200  # trừ phần header
 
 
-# ── Lọc câu AI sinh ──────────────────────────────────────────────────────────
-
+# Lọc câu AI sinh
 def test_giu_cau_hop_le():
     result = _normalize({"title": "Ôn tập", "questions": [{
         "format": "mc",
@@ -148,8 +148,7 @@ def test_title_rong_co_mac_dinh():
     assert result["title"]
 
 
-# ── Ngăn cách dòng trong hệ phương trình ─────────────────────────────────────
-
+# Ngăn cách dòng trong hệ phương trình
 def test_va_ngan_cach_dong_bi_mat_escape():
     """Model hay trả 1 gạch chéo thay vì 2 -> KaTeX coi là dấu cách, hai phương
     trình dồn thành MỘT dòng và học sinh đọc sai đề."""
@@ -201,8 +200,7 @@ def test_va_ca_trong_option_va_explanation():
     assert r"\\" in q["explanation"]
 
 
-# ── Dựng prompt ──────────────────────────────────────────────────────────────
-
+# Dựng prompt
 def test_prompt_khong_dung_str_format():
     """Prompt chứa "{cases}" trong ví dụ LaTeX. Nếu ai đó đổi lại sang .format()
     thì Python coi đó là placeholder và ném KeyError('cases') -> KHÔNG sinh được
@@ -216,3 +214,24 @@ def test_prompt_khong_dung_str_format():
     built = _PROMPT.replace("<<PROMPT>>", "YÊU CẦU").replace("<<DOCUMENTS>>", "TÀI LIỆU")
     assert "YÊU CẦU" in built and "TÀI LIỆU" in built
     assert "<<PROMPT>>" not in built and "<<DOCUMENTS>>" not in built
+
+
+# Đối chiếu môn học
+def test_tai_lieu_rong_bi_tu_choi():
+    """Không có chữ thì không thể là học liệu — chặn luôn, khỏi gọi model."""
+    result = asyncio.run(check_relevance(None, "   ", "Toán"))
+    assert result["relevant"] is False
+    assert result["reason"]
+
+
+def test_loi_goi_model_thi_cho_qua():
+    """Dịch vụ AI trục trặc KHÔNG được biến thành chặn gia sư tải tài liệu."""
+
+    class Broken:
+        class models:
+            @staticmethod
+            def generate_content(**_):
+                raise RuntimeError("Gemini down")
+
+    result = asyncio.run(check_relevance(Broken(), "Học liệu môn Toán", "Toán"))
+    assert result["relevant"] is True

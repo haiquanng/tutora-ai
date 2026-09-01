@@ -6,7 +6,7 @@ practice_sets/questions), ở đây chỉ đọc file / gọi Gemini rồi trả
 
 Dùng GEMINI_CLASSROOM_KEY riêng để quota lớp học không đụng quota /solve.
 """
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 
 from ..models.classroom import (
     MaterialExtractResponse,
@@ -14,7 +14,7 @@ from ..models.classroom import (
     GeneratePracticeResponse,
 )
 from ..core.dependencies import get_classroom_gemini_client
-from ..services.classroom import extract, generate
+from ..services.classroom import classify, extract, generate
 
 router = APIRouter(prefix="/api/v1")
 
@@ -25,6 +25,8 @@ _MAX_BYTES = 25 * 1024 * 1024
 @router.post("/materials/extract", response_model=MaterialExtractResponse)
 async def extract_material(
     file: UploadFile = File(...),
+    subject: str | None = Form(default=None),
+    grade: str | None = Form(default=None),  # noqa: ARG001 - BE vẫn gửi, không dùng để chặn
     gemini=Depends(get_classroom_gemini_client),
 ):
     """Tài liệu (pdf/ảnh) -> toàn văn có mốc '[trang N]'.
@@ -58,7 +60,17 @@ async def extract_material(
             error="Tài liệu không có nội dung chữ đọc được.",
         )
 
-    return MaterialExtractResponse(full_text=full_text, page_count=page_count or None)
+    # BE gửi kèm môn, sau đó kiểm tra tài liệu có đúng MÔN không.
+    relevance = None
+    if subject:
+        relevance = await classify.check_relevance(gemini, full_text, subject)
+
+    return MaterialExtractResponse(
+        full_text=full_text,
+        page_count=page_count or None,
+        relevant=None if relevance is None else relevance["relevant"],
+        reject_reason=None if relevance is None else relevance["reason"],
+    )
 
 
 @router.post("/practice/generate", response_model=GeneratePracticeResponse)
