@@ -15,6 +15,7 @@ from ..schemas import WebChatResponse
 from ..handlers.base import BaseHandler, HandlerContext
 from ...knowledge.retrieve import retrieve_kb
 from ....core.dependencies import get_gemini_client
+from ...telemetry.usage import track
 
 _MODEL = "gemini-2.5-flash-lite"
 
@@ -61,14 +62,15 @@ def _answer_from_passages(question: str, ctx_text: str, history: list[dict]) -> 
         f"Câu hỏi: {question}"
     )
     try:
-        resp = gemini.models.generate_content(
-            model=_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.2,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
-        )
+        with track("web_agent_faq", _MODEL) as _t:
+            resp = _t.done(gemini.models.generate_content(
+                model=_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                ),
+            ))
         return (resp.text or "").strip()
     except Exception as e:
         print(f"web faq answer error: {e}")

@@ -2,6 +2,10 @@ from google import genai
 from google.genai import types
 import json
 
+from ..telemetry.usage import track
+
+_MODEL = "gemini-2.5-flash"
+
 CLASSIFY_PROMPT = """Phân tích input và trả về JSON:
 {
   "is_math_related": true/false,
@@ -60,15 +64,16 @@ CHỈ trả về JSON."""
 async def classify_problem(client: genai.Client, problem_text: str) -> dict:
     """Phân loại bài toán → grade, chapter."""
     try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=f"{CLASSIFY_PROMPT}\n\nBài toán: {problem_text}",
-            config=types.GenerateContentConfig(
-                temperature=0.1,
-                response_mime_type="application/json",
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            )
-        )
+        with track("homework_classify", _MODEL) as _t:
+            response = _t.done(client.models.generate_content(
+                model=_MODEL,
+                contents=f"{CLASSIFY_PROMPT}\n\nBài toán: {problem_text}",
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    response_mime_type="application/json",
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                ),
+            ))
         return json.loads(response.text)
     except Exception as e:
         print(f"Classifier error: {e}")

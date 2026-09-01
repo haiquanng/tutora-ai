@@ -1,5 +1,6 @@
 import asyncio
 import re
+import time
 from typing import Optional, List, AsyncGenerator
 from google import genai
 from google.genai import types
@@ -14,6 +15,7 @@ from ...utils.prompt import (
     build_proficiency_block,
 )
 from .step_segmenter import segment_steps
+from ..telemetry import usage as usage_telemetry
 
 _THINK_MODEL = "gemini-2.5-flash-lite"
 _SOLVE_MODEL = "gemini-2.5-flash"
@@ -277,17 +279,43 @@ async def solve_stream(
 
     loop = asyncio.get_event_loop()
 
-    def _run_stream(contents, cfg, queue: asyncio.Queue, model: str = _SOLVE_MODEL):
+    def _run_stream(contents, cfg, queue: asyncio.Queue, model: str = _SOLVE_MODEL,
+                    feature: str = "solve"):
         """Chạy 1 lời gọi stream trong thread, đẩy (kind, text) vào queue, kết bằng None."""
         def _worker():
+            started = time.monotonic()
+            # Stream chỉ đính usage_metadata ở CHUNK CUỐI -> giữ chunk gần nhất có
+            # metadata, bóc sau khi hết vòng lặp.
+            last_meta_chunk = None
+            error: Exception | None = None
             try:
                 for chunk in client.models.generate_content_stream(
                     model=model, contents=contents, config=cfg
                 ):
+                    if getattr(chunk, "usage_metadata", None) is not None:
+                        last_meta_chunk = chunk
                     for kind, text in _iter_parts(chunk):
                         if kind:
                             loop.call_soon_threadsafe(queue.put_nowait, (kind, text))
+            except Exception as exc:
+                error = exc
+                raise
             finally:
+                # Worker chạy ở thread khác -> phải nhờ loop chính tạo task ghi usage.
+                if error is not None:
+                    rec = usage_telemetry.UsageRecord(
+                        feature=feature, model=model, success=False,
+                        error=f"{type(error).__name__}: {error}"[:500],
+                    )
+                elif last_meta_chunk is not None:
+                    rec = usage_telemetry.extract_usage(last_meta_chunk, feature, model)
+                else:
+                    rec = usage_telemetry.UsageRecord(feature=feature, model=model)
+                rec.latency_ms = int((time.monotonic() - started) * 1000)
+                # KHÔNG dùng create_task trên loop chính: request SSE đóng ngay sau
+                # chunk cuối, task chưa kịp chạy đã bị bỏ -> mất số liệu. Gửi thẳng
+                # từ thread này bằng loop riêng, chờ xong mới báo kết thúc queue.
+                usage_telemetry.record_sync(rec)
                 loop.call_soon_threadsafe(queue.put_nowait, None)
         return loop.run_in_executor(None, _worker)
 
@@ -310,6 +338,7 @@ async def solve_stream(
             think_cfg,
             think_q,
             model=_THINK_MODEL,  # thinking dùng flash-lite (rẻ, không cần verify)
+            feature="solve_thinking",
         )
         while True:
             item = await think_q.get()

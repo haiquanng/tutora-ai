@@ -15,6 +15,7 @@ from google.genai import types
 from ..schemas import WebChatResponse
 from ..handlers.base import BaseHandler, HandlerContext
 from ....core.dependencies import get_gemini_client
+from ...telemetry.usage import track
 
 _MODEL = "gemini-2.5-flash-lite"
 
@@ -51,13 +52,14 @@ def _ask_more(ctx: HandlerContext) -> str:
         "- KHÔNG chào lại, KHÔNG nhắc tên gia sư. Chỉ trả về câu đó."
     )
     try:
-        resp = get_gemini_client().models.generate_content(
-            model=_MODEL, contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.7,   # cần đa dạng, không lặp y hệt mỗi lượt
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
-        )
+        with track("web_agent_consult", _MODEL) as _t:
+            resp = _t.done(get_gemini_client().models.generate_content(
+                model=_MODEL, contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.7,   # cần đa dạng, không lặp y hệt mỗi lượt
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                ),
+            ))
         return (resp.text or "").strip().strip('"')
     except Exception as e:
         print(f"web consult ask-more error: {e}")

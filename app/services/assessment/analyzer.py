@@ -10,6 +10,7 @@ from typing import Any
 
 from google.genai import types
 from pydantic import BaseModel, ValidationError
+from ..telemetry.usage import track
 
 from ...models.assessment import (
     AnalysisInput,
@@ -259,11 +260,12 @@ async def analyze(client, inp: AnalysisInput) -> AnalysisOutput:
         response_schema=AnalysisSchema,
     )
 
-    response = await client.aio.models.generate_content(
-        model=_MODEL,
-        contents=build_prompt(inp),
-        config=cfg,
-    )
+    with track("assessment_analyze", _MODEL) as _t:
+        response = _t.done(await client.aio.models.generate_content(
+            model=_MODEL,
+            contents=build_prompt(inp),
+            config=cfg,
+        ))
 
     text = _strip_fence(response.text or "")
     if not text:

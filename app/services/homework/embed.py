@@ -16,6 +16,7 @@ import asyncio
 from google import genai
 
 from ...models.embed import EmbedRequest, EmbedResponse, EmbedResultItem
+from ..telemetry.usage import track
 
 GEMINI_EMBED_MODEL = "gemini-embedding-2"
 EMBED_DIM = 768
@@ -25,11 +26,12 @@ _BATCH_PAUSE_SECONDS = 3
 
 
 def _embed_one(gemini: genai.Client, text: str) -> list[float]:
-    result = gemini.models.embed_content(
-        model=GEMINI_EMBED_MODEL,
-        contents=text,
-        config={"output_dimensionality": EMBED_DIM},
-    )
+    with track("question_bank_embed", GEMINI_EMBED_MODEL) as _t:
+        result = _t.done(gemini.models.embed_content(
+            model=GEMINI_EMBED_MODEL,
+            contents=text,
+            config={"output_dimensionality": EMBED_DIM},
+        ))
     return result.embeddings[0].values
 
 

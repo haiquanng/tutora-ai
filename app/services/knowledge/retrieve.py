@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from ...core.config import get_settings
 from ...core.dependencies import get_supabase, get_gemini_client
+from ..telemetry.usage import track
 
 _settings = get_settings()
 
@@ -21,11 +22,12 @@ async def retrieve_kb(query: str, top_k: int = _DEFAULT_TOP_K,
     """Trả list {content, title, similarity} đã lọc theo ngưỡng. Rỗng nếu không đủ gần /lỗi."""
     try:
         gemini = get_gemini_client()
-        result = gemini.models.embed_content(
-            model=GEMINI_EMBED_MODEL,
-            contents=query,
-            config={"output_dimensionality": _settings.rag_embedding_dim},
-        )
+        with track("kb_retrieve_embed", GEMINI_EMBED_MODEL) as _t:
+            result = _t.done(gemini.models.embed_content(
+                model=GEMINI_EMBED_MODEL,
+                contents=query,
+                config={"output_dimensionality": _settings.rag_embedding_dim},
+            ))
         embedding = result.embeddings[0].values
 
         rows = get_supabase().rpc("match_tutora_kb", {

@@ -13,6 +13,7 @@ import json
 import re
 
 from google.genai import types
+from ..telemetry.usage import track
 
 MODEL = "gemini-2.5-flash"
 
@@ -214,19 +215,20 @@ async def generate_practice(gemini, materials: list[dict], prompt: str) -> dict:
         return {"title": "", "questions": [], "error": "Tài liệu không có nội dung."}
 
     try:
-        response = await asyncio.to_thread(
-            gemini.models.generate_content,
-            model=MODEL,
-            contents=(
-                _PROMPT.replace("<<PROMPT>>", prompt.strip()).replace("<<DOCUMENTS>>", documents)
-            ),
-            config=types.GenerateContentConfig(
-                # Đề ôn tập cần bám sát tài liệu, không cần sáng tạo.
-                temperature=0.2,
-                response_mime_type="application/json",
-                response_schema=_SCHEMA,
-            ),
-        )
+        with track("classroom_generate_practice", MODEL) as _t:
+            response = _t.done(await asyncio.to_thread(
+                gemini.models.generate_content,
+                model=MODEL,
+                contents=(
+                    _PROMPT.replace("<<PROMPT>>", prompt.strip()).replace("<<DOCUMENTS>>", documents)
+                ),
+                config=types.GenerateContentConfig(
+                    # Đề ôn tập cần bám sát tài liệu, không cần sáng tạo.
+                    temperature=0.2,
+                    response_mime_type="application/json",
+                    response_schema=_SCHEMA,
+                ),
+            ))
         raw = json.loads(response.text)
     except Exception as e:
         print(f"generate_practice error: {e}")

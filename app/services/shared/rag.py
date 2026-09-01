@@ -3,6 +3,7 @@ from typing import Optional, List
 from supabase import Client
 from google import genai
 from app.core.config import get_settings
+from ..telemetry.usage import track
 
 logger = logging.getLogger(__name__)
 _settings = get_settings()
@@ -36,11 +37,12 @@ async def retrieve_questions(
     try:
         if not gemini:
             return []
-        result = gemini.models.embed_content(
-            model="gemini-embedding-2",
-            contents=query,
-            config={"output_dimensionality": _settings.rag_embedding_dim},
-        )
+        with track("rag_embed", "gemini-embedding-2") as _t:
+            result = _t.done(gemini.models.embed_content(
+                model="gemini-embedding-2",
+                contents=query,
+                config={"output_dimensionality": _settings.rag_embedding_dim},
+            ))
         embedding = result.embeddings[0].values
 
         db_result = sb.rpc("match_questions", {

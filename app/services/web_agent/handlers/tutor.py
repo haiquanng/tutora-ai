@@ -13,6 +13,7 @@ from ..schemas import WebChatResponse, TutorCard
 from ..handlers.base import BaseHandler, HandlerContext
 from ...tutoring_shared.candidates import _fetch_candidates
 from ....core.dependencies import get_gemini_client
+from ...telemetry.usage import track
 
 _MODEL = "gemini-2.5-flash-lite"
 
@@ -47,13 +48,14 @@ def _follow_up_question(ctx, current_reply: str) -> str:
         "- Chỉ trả về câu đó, không giải thích."
     )
     try:
-        resp = get_gemini_client().models.generate_content(
-            model=_MODEL, contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.7,   # cao hơn các call khác: cần đa dạng, không lặp mỗi lượt
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
-        )
+        with track("web_agent_tutor", _MODEL) as _t:
+            resp = _t.done(get_gemini_client().models.generate_content(
+                model=_MODEL, contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.7,   # cao hơn các call khác: cần đa dạng, không lặp mỗi lượt
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                ),
+            ))
         return (resp.text or "").strip().strip('"')
     except Exception as e:
         print(f"web tutor follow-up error: {e}")

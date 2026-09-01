@@ -19,6 +19,7 @@ from google.genai import types
 from ..schemas import WebChatResponse
 from ..handlers.base import BaseHandler, HandlerContext
 from ....core.dependencies import get_supabase, get_gemini_client
+from ...telemetry.usage import track
 
 _MODEL = "gemini-2.5-flash-lite"
 
@@ -274,13 +275,14 @@ def _answer(question: str, facts: str, history: list[dict]) -> str:
         f"Câu hỏi: {question}"
     )
     try:
-        resp = get_gemini_client().models.generate_content(
-            model=_MODEL, contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.2,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
-        )
+        with track("web_agent_tutor_info", _MODEL) as _t:
+            resp = _t.done(get_gemini_client().models.generate_content(
+                model=_MODEL, contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                ),
+            ))
         return (resp.text or "").strip()
     except Exception as e:
         print(f"web tutor_info answer error: {e}")

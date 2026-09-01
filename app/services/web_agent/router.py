@@ -23,6 +23,7 @@ from google.genai import types
 
 from ...core.dependencies import get_gemini_client
 from ...models.schemas import TutorChatFilters
+from ..telemetry.usage import track
 
 _MODEL = "gemini-2.5-flash-lite"
 
@@ -162,15 +163,16 @@ async def route(
         + f"\n\nTin nhắn mới: {message or '(chưa có, mới bắt đầu)'}"
     )
     try:
-        resp = gemini.models.generate_content(
-            model=_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.1,
-                response_mime_type="application/json",
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
-        )
+        with track("web_agent_router", _MODEL) as _t:
+            resp = _t.done(gemini.models.generate_content(
+                model=_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    response_mime_type="application/json",
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                ),
+            ))
         data = json.loads(resp.text)
     except Exception as e:
         print(f"web router error: {e}")

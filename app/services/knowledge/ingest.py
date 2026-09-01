@@ -18,6 +18,7 @@ from ...core.config import get_settings
 from ...core.dependencies import get_supabase, get_gemini_client
 from .extract import detect_source_type, extract_blocks
 from .chunk import chunk_blocks
+from ..telemetry.usage import track
 
 _settings = get_settings()
 
@@ -29,11 +30,12 @@ _EMBED_SLEEP = 2.0
 
 def _embed_one(text: str) -> list[float]:
     gemini = get_gemini_client()
-    result = gemini.models.embed_content(
-        model=GEMINI_EMBED_MODEL,
-        contents=text,
-        config={"output_dimensionality": _settings.rag_embedding_dim},
-    )
+    with track("kb_ingest_embed", GEMINI_EMBED_MODEL) as _t:
+        result = _t.done(gemini.models.embed_content(
+            model=GEMINI_EMBED_MODEL,
+            contents=text,
+            config={"output_dimensionality": _settings.rag_embedding_dim},
+        ))
     return result.embeddings[0].values
 
 
