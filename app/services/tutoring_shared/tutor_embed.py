@@ -13,6 +13,7 @@ from google import genai
 
 from ...core.config import get_settings
 from ...core.dependencies import get_supabase, get_gemini_client
+from ..telemetry.usage import track
 
 _settings = get_settings()
 GEMINI_EMBED_MODEL = "gemini-embedding-2"
@@ -128,11 +129,12 @@ def _load_meta(sb, tutor_id: str, profile: dict) -> dict:
 
 def _embed(text: str) -> list[float]:
     gemini: genai.Client = get_gemini_client()
-    result = gemini.models.embed_content(
-        model=GEMINI_EMBED_MODEL,
-        contents=text,
-        config={"output_dimensionality": _settings.rag_embedding_dim},
-    )
+    with track("tutor_profile_embed", GEMINI_EMBED_MODEL) as _t:
+        result = _t.done(gemini.models.embed_content(
+            model=GEMINI_EMBED_MODEL,
+            contents=text,
+            config={"output_dimensionality": _settings.rag_embedding_dim},
+        ))
     return result.embeddings[0].values
 
 

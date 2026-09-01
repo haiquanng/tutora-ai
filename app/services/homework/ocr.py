@@ -2,6 +2,9 @@ import base64
 import binascii
 from google import genai
 from google.genai import types
+from ..telemetry.usage import track
+
+_MODEL = "gemini-2.5-flash"
 
 _OCR_PROMPT = (
     "Bạn là công cụ OCR đề Toán. Đọc và trích xuất NGUYÊN VĂN bài toán từ ảnh. "
@@ -59,15 +62,16 @@ async def extract_from_image(client: genai.Client, image_base64: str) -> str:
         return NO_MATH
     mime = _detect_mime(image_bytes)
     try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[
-                types.Content(parts=[
-                    types.Part.from_bytes(data=image_bytes, mime_type=mime),
-                    types.Part.from_text(text=_OCR_PROMPT),
-                ])
-            ]
-        )
+        with track("homework_ocr_image", _MODEL) as _t:
+            response = _t.done(client.models.generate_content(
+                model=_MODEL,
+                contents=[
+                    types.Content(parts=[
+                        types.Part.from_bytes(data=image_bytes, mime_type=mime),
+                        types.Part.from_text(text=_OCR_PROMPT),
+                    ])
+                ]
+            ))
     except Exception:
         # Ảnh hỏng/không giải mã được -> coi như không đọc được đề, không giải bịa.
         return NO_MATH
@@ -95,15 +99,16 @@ async def extract_from_url(client: genai.Client, image_url: str) -> str:
     if not mime.startswith("image/"):
         mime = _detect_mime(image_bytes)
     try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[
-                types.Content(parts=[
-                    types.Part.from_bytes(data=image_bytes, mime_type=mime),
-                    types.Part.from_text(text=_OCR_PROMPT),
-                ])
-            ]
-        )
+        with track("homework_ocr_url", _MODEL) as _t:
+            response = _t.done(client.models.generate_content(
+                model=_MODEL,
+                contents=[
+                    types.Content(parts=[
+                        types.Part.from_bytes(data=image_bytes, mime_type=mime),
+                        types.Part.from_text(text=_OCR_PROMPT),
+                    ])
+                ]
+            ))
     except Exception:
         return NO_MATH
     return _validate_ocr(response.text)

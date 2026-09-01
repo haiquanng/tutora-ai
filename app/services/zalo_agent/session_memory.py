@@ -25,6 +25,7 @@ from ...models.schemas import (
     SummarizeSessionResponse,
     SessionMemory,
 )
+from ..telemetry.usage import track
 
 _MODEL = "gemini-2.5-flash-lite"
 
@@ -94,14 +95,15 @@ async def summarize_session(body: SummarizeSessionRequest) -> SummarizeSessionRe
 
 async def _generate_json(gemini: genai.Client, prompt: str) -> str:
     import asyncio
-    resp = await asyncio.to_thread(
-        gemini.models.generate_content,
-        model=_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.2,
-            response_mime_type="application/json",
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
-        ),
-    )
+    with track("zalo_session_memory", _MODEL) as _t:
+        resp = _t.done(await asyncio.to_thread(
+            gemini.models.generate_content,
+            model=_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                response_mime_type="application/json",
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
+        ))
     return resp.text

@@ -8,6 +8,9 @@ import asyncio
 from google.genai import types
 
 from ..homework.ocr import _detect_mime
+from ..telemetry.usage import track
+
+_MODEL = "gemini-2.5-flash"
 
 # Ảnh chụp bảng/vở thì OCR; PDF đọc text trực tiếp nhanh và chính xác hơn nhiều.
 _IMAGE_OCR_PROMPT = (
@@ -43,14 +46,15 @@ async def extract_image_text(gemini, file_bytes: bytes) -> str:
     """Ảnh -> toàn văn qua Gemini. Ảnh là 1 trang nên gắn mốc [trang 1]."""
     mime = _detect_mime(file_bytes)
 
-    response = await asyncio.to_thread(
-        gemini.models.generate_content,
-        model="gemini-2.5-flash",
-        contents=[
-            types.Part.from_bytes(data=file_bytes, mime_type=mime),
-            _IMAGE_OCR_PROMPT,
-        ],
-    )
+    with track("classroom_extract_image", _MODEL) as _t:
+        response = _t.done(await asyncio.to_thread(
+            gemini.models.generate_content,
+            model=_MODEL,
+            contents=[
+                types.Part.from_bytes(data=file_bytes, mime_type=mime),
+                _IMAGE_OCR_PROMPT,
+            ],
+        ))
 
     text = (response.text or "").strip()
     if not text or text.startswith(NO_CONTENT):

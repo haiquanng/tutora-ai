@@ -37,6 +37,7 @@ from ...models.schemas import (
 )
 from ..tutoring_shared.candidates import _fetch_candidates, _get_subjects, _normalize_city
 from ..knowledge.retrieve import retrieve_kb
+from ..telemetry.usage import track
 
 _settings = get_settings()
 
@@ -58,9 +59,11 @@ async def _generate(contents, config):
     last_exc = None
     for attempt in range(len(_RETRY_DELAYS) + 1):
         try:
-            return await asyncio.to_thread(
-                gemini.models.generate_content, model=_MODEL, contents=contents, config=config,
-            )
+            with track("zalo_agent", _MODEL) as _t:
+                return _t.done(await asyncio.to_thread(
+                    gemini.models.generate_content, model=_MODEL,
+                    contents=contents, config=config,
+                ))
         except _RETRYABLE as e:
             code = getattr(e, "code", None)
             if code is not None and code < 500 and code != 429:

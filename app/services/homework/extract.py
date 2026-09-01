@@ -22,6 +22,7 @@ from google import genai
 from google.genai import types
 
 from ...models.extract import ExtractPdfResponse, ExtractedQuestion
+from ..telemetry.usage import track
 
 MODEL = "gemini-2.5-flash"
 
@@ -141,20 +142,21 @@ def _crop_rect(page: fitz.Page, rect: fitz.Rect) -> str | None:
 async def extract_pdf(client: genai.Client, pdf_bytes: bytes) -> ExtractPdfResponse:
     import json
     try:
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=[
-                types.Content(parts=[
-                    types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
-                    types.Part.from_text(text=_PROMPT),
-                ])
-            ],
-            config=types.GenerateContentConfig(
-                temperature=0.0,
-                response_mime_type="application/json",
-                response_schema=_SCHEMA,
-            ),
-        )
+        with track("homework_extract_pdf", MODEL) as _t:
+            response = _t.done(client.models.generate_content(
+                model=MODEL,
+                contents=[
+                    types.Content(parts=[
+                        types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+                        types.Part.from_text(text=_PROMPT),
+                    ])
+                ],
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    response_mime_type="application/json",
+                    response_schema=_SCHEMA,
+                ),
+            ))
         raw = json.loads(response.text)
 
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")

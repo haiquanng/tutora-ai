@@ -5,6 +5,7 @@ from supabase import Client
 from ...core.config import get_settings
 from ...core.dependencies import get_supabase, get_gemini_client
 from ...models.schemas import TutorRecommendResult
+from ..telemetry.usage import track
 
 _settings = get_settings()
 
@@ -178,11 +179,12 @@ async def match_tutors(
     # top_k theo similarity thuần, gia sư rating cao nhưng similarity hơi thấp có thể
     # đã bị loại trước khi kịp tính điểm tổng hợp.
     gemini_client: genai.Client = get_gemini_client()
-    result = gemini_client.models.embed_content(
-        model="gemini-embedding-2",
-        contents=query,
-        config={"output_dimensionality": _settings.rag_embedding_dim},
-    )
+    with track("tutor_matching_embed", "gemini-embedding-2") as _t:
+        result = _t.done(gemini_client.models.embed_content(
+            model="gemini-embedding-2",
+            contents=query,
+            config={"output_dimensionality": _settings.rag_embedding_dim},
+        ))
     embedding = result.embeddings[0].values
 
     OVER_FETCH = 3
