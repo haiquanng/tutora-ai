@@ -93,3 +93,39 @@ def test_khong_neu_lich_thi_khong_loc():
     f = routed["filters"]
     assert not f.get("available_days")
     assert not f.get("available_from")
+
+
+# ─────────── "rảnh CẢ T7 và CN" (all) vs "cuối tuần" (any) ───────────
+
+def test_router_chot_all_khi_user_liet_ke_thu_cu_the():
+    """Ranh giới all/any do CODE quyết, không phó mặc LLM: đoán sai thì kết quả sai mà
+    không có dấu hiệu gì (bug 2026-09-02)."""
+    from app.services.web_agent.router import _fix_days_match
+
+    def run(msg, days=(6, 7)):
+        return _fix_days_match({"available_days": list(days)}, msg).get("available_days_match")
+
+    assert run("gia sư rảnh cả T7 và CN") == "all"
+    assert run("cần rảnh thứ 7 và chủ nhật") == "all"
+    assert run("dạy được cả thứ 3 lẫn thứ 5", days=(2, 4)) == "all"
+    # Có từ khoá "hoặc"/"đều được" → chỉ cần rảnh một trong số đó.
+    assert run("thứ 7 hoặc chủ nhật đều được") == "any"
+    assert run("t7 hay cn cũng được") == "any"
+    # Chỉ 1 ngày → all/any như nhau, không tạo state thừa.
+    assert run("rảnh chủ nhật", days=(7,)) is None
+    # "cuối tuần" không nêu thứ tường minh → để LLM quyết, code không can thiệp.
+    assert run("rảnh cuối tuần") is None
+
+
+def test_hoac_o_menh_de_khac_khong_lam_hong_lich():
+    """Bug thật 2026-09-02: "rảnh được t7 và CN, ... giảng dạy ở UK HOẶC trung quốc" —
+    chữ "hoặc" nói về QUỐC GIA, không phải về lịch, nhưng lại hạ lịch thành "một trong hai"."""
+    from app.services.web_agent.router import _fix_days_match
+
+    msg = ("tôi muốn tìm gia sư toán 12, rảnh được t7 và CN, tốt nghiệp ở các trường quốc "
+           "tế như Nottingham và có kinh nghiệm giảng dạy ở các nước như UK hoặc trung quốc")
+    assert _fix_days_match({"available_days": [6, 7]}, msg)["available_days_match"] == "all"
+
+    # "hoặc" nằm ĐÚNG vế nói về thứ thì vẫn phải hiểu là "một trong hai".
+    msg2 = "tìm gia sư toán, rảnh t7 hoặc cn đều được, tốt nghiệp Nottingham"
+    assert _fix_days_match({"available_days": [6, 7]}, msg2)["available_days_match"] == "any"

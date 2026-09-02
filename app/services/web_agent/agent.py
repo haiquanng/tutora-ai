@@ -12,6 +12,8 @@ Luồng 1 lượt:
 """
 from __future__ import annotations
 
+import unicodedata
+
 from .schemas import WebChatRequest, WebChatResponse
 from . import router as router_mod
 from . import guardrail
@@ -41,6 +43,39 @@ _CLEAR = "__clear__"
 _LONG_MESSAGE_CHARS = 220
 
 
+# Trần độ dài preferences: đây là text nhồi vào query embedding, để trôi vô hạn thì mong
+# muốn cũ sẽ pha loãng mong muốn mới và làm nhiễu xếp hạng.
+_MAX_PREFERENCES_CHARS = 300
+
+
+def _append_preference(prev: str | None, new: str) -> str:
+    new = (new or "").strip()
+    if not prev:
+        return new[:_MAX_PREFERENCES_CHARS]
+    if not new or new.lower() in prev.lower():
+        return prev
+    return f"{prev}, {new}"[:_MAX_PREFERENCES_CHARS]
+
+
+# Dấu hiệu user muốn NGƯỜI KHÁC / hỏi chung cả nhóm, chứ không hỏi về 1 gia sư đã hiện.
+# "co ai" tách biệt với "co ay" (cô ấy) sau khi bỏ dấu nên không đụng nhau.
+_SEEK_OTHER_PATTERNS = (
+    "nguoi khac", "gia su khac", "ai khac", "thay khac", "co khac",
+    "tim them", "xem them", "tim nguoi", "doi gia su", "doi nguoi",
+    "co ai", "ai co", "gia su nao", "nguoi nao", "ai la nguoi",
+)
+
+
+def _no_accent(text: str) -> str:
+    out = "".join(c for c in unicodedata.normalize("NFD", text or "")
+                  if unicodedata.category(c) != "Mn").lower()
+    return out.replace("đ", "d")
+
+
+def _seeks_other_tutor(message: str) -> bool:
+    return any(p in _no_accent(message) for p in _SEEK_OTHER_PATTERNS)
+
+
 def _merge_filters(prev: TutorChatFilters, new: dict) -> TutorChatFilters:
     """Tích luỹ state: giữ giá trị cũ, chỉ override field router vừa trích (non-null).
     """
@@ -51,7 +86,11 @@ def _merge_filters(prev: TutorChatFilters, new: dict) -> TutorChatFilters:
         if v == _CLEAR:
             merged[k] = None
         elif v is not None:
-            merged[k] = v
+            # preferences là tiêu chí MỀM tích luỹ: user nêu thêm mong muốn ở lượt sau thì
+            # cộng vào, không đè mất cái cũ ("con mất gốc" lượt 1 + "cần cô kiên nhẫn"
+            # lượt 3 = cả hai đều phải vào query xếp hạng). Các trục khác thì ghi đè, vì
+            # chúng là giá trị đơn (giá mới thay giá cũ).
+            merged[k] = _append_preference(merged.get(k), v) if k == "preferences" else v
     return TutorChatFilters(**merged)
 
 
@@ -76,6 +115,14 @@ async def web_chat(body: WebChatRequest) -> WebChatResponse:
     filters = _merge_filters(prev, routed["filters"])
 
     intent = routed["intent"]
+
+    # Router hay nhầm "xin gia sư KHÁC" thành tutor_info, vì câu vẫn nhắc tới mấy người
+    # vừa hiện ("2 người đó không có chứng chỉ, tôi muốn tìm người khác có chứng chỉ").
+    # Hậu quả: handler tutor_info đi kể hồ sơ của đúng người user vừa nói là KHÔNG muốn.
+    # Chốt bằng code — câu xin người khác có dấu hiệu rất rõ, không cần LLM đoán.
+    if intent == "tutor_info" and _seeks_other_tutor(body.message):
+        intent = "tutor"
+        routed["reply"] = ""   # câu router sinh là câu hỏi lại, giữ sẽ lệch hẳn ngữ cảnh
 
     _msg = (body.message or "").strip()
     _selfintro_hits = sum(
@@ -135,6 +182,7 @@ async def web_chat(body: WebChatRequest) -> WebChatResponse:
         router_reply=router_reply,
         suggestions=routed["suggestions"],
         shown_tutors=body.shown_tutors,
+        prior_preferences=prev.preferences,
     )
     handler = _HANDLERS[intent]
     resp = await handler.handle(ctx)

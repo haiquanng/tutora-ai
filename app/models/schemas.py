@@ -83,6 +83,21 @@ class TutorChatFilters(BaseModel):
     available_days: Optional[List[int]] = None
     available_from: Optional[str] = None   # "HH:MM"
     available_to: Optional[str] = None     # "HH:MM"
+    # "all" = phải rảnh TẤT CẢ ngày trong available_days ("rảnh cả T7 và CN").
+    # "any"/None = rảnh MỘT TRONG số đó ("cuối tuần", "trong tuần") — mặc định, giữ nguyên
+    # hành vi cũ của SQL. Thiếu trục này là nguồn của bug 2026-09-02: mọi yêu cầu đều bị
+    # hiểu thành "hoặc", gia sư chỉ rảnh T7 vẫn lọt khi user xin cả T7 lẫn CN.
+    available_days_match: Optional[str] = None
+    # TIÊU CHÍ MỀM tích luỹ ("con mất gốc", "cần cô kiên nhẫn", "ưu tiên thạc sĩ").
+    # Không lọc cứng được (không có cột nào trong DB), nhưng phải NHỚ: trước đây `query`
+    # gửi cho ranking chỉ là TIN NHẮN HIỆN TẠI, nên mong muốn nêu ở lượt 1 biến mất ngay
+    # từ lượt 2 — xếp hạng như thể user chưa từng nói.
+    preferences: Optional[str] = None
+    # Gia sư ĐÃ giới thiệu, cần loại khi user xin xem NGƯỜI KHÁC ("còn ai khác không").
+    # Nằm trong filters vì đây cũng là state tích luỹ qua các lượt, đi cùng đường round-trip
+    # (FE giữ hộ → .NET chuyển nguyên khối). Chỉ tích luỹ khi user xin thêm; mọi câu tìm
+    # kiếm bình thường sẽ XOÁ nó — xem handlers/tutor.py, tránh pool teo dần vĩnh viễn.
+    exclude_tutor_ids: Optional[List[str]] = None
 
 
 class ShownTutor(BaseModel):

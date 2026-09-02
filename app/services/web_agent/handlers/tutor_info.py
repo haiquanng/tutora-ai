@@ -42,6 +42,25 @@ def _strip_accents(s: str) -> str:
     return out.replace("đ", "d")
 
 
+def _mentions(text: str, tutor) -> bool:
+    """Tên gia sư có xuất hiện trong đoạn text (đã bỏ dấu) không — khớp cả tên gọi tắt."""
+    name = _strip_accents(getattr(tutor, "name", "") or "")
+    if not name:
+        return False
+    parts = name.split()
+    for n in (len(parts), 2, 1):
+        if n < 1 or len(parts) < n:
+            continue
+        tail = " ".join(parts[-n:])
+        if len(tail) >= 2 and re.search(rf"\b{re.escape(tail)}\b", text):
+            return True
+    return False
+
+
+def _count_mentions(text: str, shown: list) -> int:
+    return sum(1 for t in shown if _mentions(text, t))
+
+
 def _focus_from_history(history: list[dict], shown: list) -> object | None:
     """Gia sư đang được NÓI TỚI trong mạch hội thoại (discourse focus).
 
@@ -52,6 +71,13 @@ def _focus_from_history(history: list[dict], shown: list) -> object | None:
     for m in reversed(history or []):
         text = _strip_accents(m.get("content") or "")
         if not text:
+            continue
+        # Tin nhắn nhắc TỪ 2 GIA SƯ TRỞ LÊN thì tự nó đã mơ hồ, không thể là focus. Điển
+        # hình là câu phân định của chính bot: "Bạn muốn hỏi về A hay B ạ?" — quét thấy A
+        # trước rồi chốt luôn A, tức bot tự trả lời câu hỏi mà nó vừa đặt ra cho user.
+        # Bug thật 2026-09-02: user nói "2 người đó tôi không thấy chứng chỉ, muốn tìm
+        # người khác", bot lại đi kể chứng chỉ của đúng 1 trong 2 người đó.
+        if _count_mentions(text, shown) >= 2:
             continue
         for t in shown:
             name = _strip_accents(getattr(t, "name", "") or "")

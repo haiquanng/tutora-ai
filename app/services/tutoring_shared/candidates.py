@@ -99,13 +99,17 @@ def _vn_to_utc(hhmm: str) -> tuple[str, int]:
 
 
 # GỌI RANKING CORE (.NET /recommend)
-async def _fetch_candidates(context, filters, query: str) -> dict:
+async def _fetch_candidates(context, filters, query: str, *, extra_top_k: int = 0) -> dict:
     """Gọi .NET recommend (POST /api/tutors/recommend) — filter SQL + profile + rerank.
     subject_id từ filter (tích luỹ/đổi môn) ưu tiên hơn subject_id của context.
     `filters` là bất kỳ object có các thuộc tính subject_id/min_rate/max_rate/tutor_gender/
     desired_count (TutorChatFilters ở cả 2 kênh đều thoả)."""
     desired = getattr(filters, "desired_count", None)
     top_k = desired if desired and desired > 0 else 10
+    # extra_top_k: caller sẽ LOẠI bớt kết quả sau khi nhận (vd đã giới thiệu rồi, user xin
+    # người khác). Không nới thì hỏi "còn ai khác" vài lần là cạn, dù DB còn nhiều gia sư
+    # khớp — vì .NET chỉ trả đúng top_k rồi ta lại vứt đi một phần.
+    top_k = min(top_k + max(extra_top_k, 0), 50)
     payload = {
         "subjectId": filters.subject_id or context.subject_id,
         # filter tích luỹ (router trích "lớp 9"→id) ưu tiên hơn context (Zalo patch) —
@@ -125,6 +129,11 @@ async def _fetch_candidates(context, filters, query: str) -> dict:
     days = getattr(filters, "available_days", None)
     if days:
         payload["availableDaysOfWeek"] = days
+        # Mặc định .NET lọc "rảnh MỘT TRONG các ngày". Chỉ bật cờ khi user nói rõ là CẢ
+        # các ngày — nếu bật cho mọi trường hợp thì "cuối tuần" hoá thành "phải rảnh cả 2
+        # ngày cuối tuần", và "trong tuần" thành "phải rảnh đủ 5 ngày".
+        if getattr(filters, "available_days_match", None) == "all":
+            payload["availableDaysMatchAll"] = True
     a_from = getattr(filters, "available_from", None)
     a_to = getattr(filters, "available_to", None)
     if a_from and a_to:
