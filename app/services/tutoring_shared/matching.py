@@ -34,6 +34,10 @@ _EXPERIENCE_LOG_CAP = 1000
 
 _EXPERIENCE_FLOOR = 0.4
 
+# Ngưỡng chênh lệch similarity tối thiểu để coi là "pool có phân biệt được". Dưới ngưỡng
+# này thì khoảng cách chỉ là nhiễu của embedding, chuẩn hoá sẽ thổi phồng nó thành 0 vs 1.
+_SIM_SPREAD_MIN = 0.03
+
 
 def _bayesian_rating(average_rating: Optional[float], total_reviews: Optional[int]) -> float:
     """Rating đã làm mượt theo số review. Trả về thang 0-5 (cùng thang average_rating gốc)."""
@@ -228,13 +232,29 @@ async def match_tutors(
     )
     meta_map = {r["tutor_id"]: r for r in meta_rows}
 
+    # Chuẩn hoá similarity trong pool — CÙNG LÝ DO đã làm với text_rank ở trên.
+    # Cosine của embedding nằm trong dải hẹp (~0.65–0.85) trong khi rating_score và
+    # experience_score trải gần trọn 0–1, nên đem so trực tiếp là so hai thang khác nhau:
+    # chênh lệch ngữ nghĩa bị bóp lại một cách hệ thống.
+    # Đo thực tế (query "tốt nghiệp Nottingham, kinh nghiệm dạy ở UK/Trung Quốc"): người
+    # khớp NHẤT có similarity 0.807 vs 0.712 của người kế (+0.038 điểm) nhưng thua vì
+    # 0 giờ dạy so với 300 giờ (−0.050 điểm) → xếp CUỐI pool. Người duy nhất đúng hồ sơ
+    # mà không được gợi ý.
+    sim_values = list(similarity_map.values())
+    _lo, _hi = (min(sim_values), max(sim_values)) if sim_values else (0.0, 0.0)
+    _spread = _hi - _lo
+    # Spread quá nhỏ = pool ai cũng na ná, chuẩn hoá chỉ khuếch đại nhiễu → coi như hoà,
+    # nhường quyền quyết định cho rating/kinh nghiệm.
+    sim_norm = ({tid: (v - _lo) / _spread for tid, v in similarity_map.items()}
+                if _spread >= _SIM_SPREAD_MIN else {tid: 0.5 for tid in similarity_map})
+
     _top = sorted(raw_text.values(), reverse=True)
     _stands_out = len(_top) >= 2 and _top[0] > 0 and _top[0] >= _top[1] * 1.3
     specific = _is_specific_query(query) or _stands_out
     ranked_ids = sorted(
         candidate_ids,
         key=lambda tid: score_tutor(
-            similarity=similarity_map.get(tid, 0.0),
+            similarity=sim_norm.get(tid, 0.0),
             average_rating=meta_map.get(tid, {}).get("average_rating"),
             total_reviews=meta_map.get(tid, {}).get("total_reviews"),
             completed_hours=meta_map.get(tid, {}).get("completed_hours"),

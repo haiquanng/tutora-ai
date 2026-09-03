@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 
 from google import genai
 from google.genai import types
@@ -43,7 +44,14 @@ huynh/học sinh với GIA SƯ. Đọc lịch sử hội thoại + TIN NHẮN M�
     "subject_id": id môn (số) nếu user muốn tìm/đổi môn, ngược lại null,
     "grade_level_id": id LỚP (số) nếu user nêu lớp/cấp học, ngược lại null,
     "desired_count": số gia sư user muốn xem nếu nêu rõ, ngược lại null,
+    "preferences": mong muốn về gia sư/mục tiêu học mà KHÔNG lọc cứng được, viết gọn
+      ("con mất gốc cần lấy lại căn bản", "cô kiên nhẫn", "ưu tiên thạc sĩ sư phạm",
+      "luyện thi vào 10"). Chỉ điền phần MỚI của lượt này, hệ thống tự cộng dồn.
+      Không nêu mong muốn nào → null. KHÔNG nhét môn/lớp/giá/giới tính/lịch vào đây —
+      chúng đã có ô riêng ở trên,
     "available_days": [số thứ] nếu user nêu NGÀY học mong muốn, ngược lại null,
+    "available_days_match": "all" nếu user đòi rảnh ĐỦ TẤT CẢ các ngày đó, "any" nếu chỉ
+      cần rảnh MỘT TRONG số đó, null nếu không nêu ngày,
     "available_from": "HH:MM" nếu user nêu KHUNG GIỜ, ngược lại null,
     "available_to": "HH:MM" nếu user nêu KHUNG GIỜ, ngược lại null
   }}
@@ -103,8 +111,13 @@ LỊCH RẢNH (available_days / available_from / available_to) — quy đổi sa
   "cuối tuần" → [6,7]; "trong tuần"/"ngày thường" → [1,2,3,4,5]; "thứ 3 và thứ 5" → [2,4].
 - Khung giờ: "sáng" → 08:00-11:00; "chiều" → 14:00-17:00; "tối" → 18:00-21:00.
   Giờ cụ thể thì lấy đúng ("sau 19h" → 19:00-21:00; "7-9h tối" → 19:00-21:00).
-- CHỈ điền khi user nêu; không nhắc → null. Đây là filter CỨNG (lọc thẳng ở DB), nên
-  reply ĐƯỢC PHÉP khẳng định đã lọc theo lịch (khác bằng cấp — cái đó chỉ ưu tiên).
+- "all" vs "any" — QUAN TRỌNG, đây là hai yêu cầu KHÁC HẲN nhau:
+    "rảnh CẢ T7 và CN", "dạy được cả thứ 3 lẫn thứ 5", "phải rảnh T7 VÀ CN" → "all"
+    "cuối tuần", "trong tuần", "T7 hoặc CN đều được", "ngày nào cũng được" → "any"
+  Không chắc thì chọn "any" (rộng hơn, không loại nhầm người phù hợp).
+- CHỈ điền khi user nêu; không nhắc → null. Đây là filter CỨNG (lọc thẳng ở DB) — nhưng
+  chỉ được khẳng định "đã lọc theo lịch" khi ngữ nghĩa áp dụng ĐÚNG như user nói; câu mở
+  đầu khi có kết quả do CODE sinh từ filter thật (handlers/tutor.py), không phải từ đây.
 
 DANH SÁCH MÔN (chọn đúng id khi user nêu môn):
 {subjects}
@@ -191,7 +204,13 @@ async def route(
         "intent": intent,
         "reply": (data.get("reply") or "").strip(),
         "suggestions": (data.get("suggestions") or [])[:3],
-        "filters": _fix_grade(_fix_days(data.get("filters") or {}, message), message, grades),
+        # Thứ tự: trích/sửa giá trị trước, XOÁ sau cùng — user bảo bỏ lịch thì phải thắng
+        # cả available_days mà LLM vừa trích ra từ chính câu đó.
+        "filters": _fix_clears(
+            _fix_grade(
+                _fix_days_match(_fix_days(data.get("filters") or {}, message), message),
+                message, grades),
+            message),
     }
 
 
@@ -215,6 +234,64 @@ _GRADE_RE = re.compile(
 )
 
 
+# ─────────────── XOÁ FILTER BẰNG CODE (không nhờ LLM nhớ) ───────────────
+# Đổi giá trị thì LLM làm tốt (user nói số mới, trích ra là xong). Nhưng BỎ một tiêu chí
+# thì phải nhận ra ý định, mà cách nói rất đa dạng — LLM trượt là filter cũ bám lại vĩnh
+# viễn, âm thầm lọc sai. Bug thật 2026-09-02: "giờ không cần xét về lịch rảnh nữa" mà
+# available_days vẫn [6,7].
+#
+# Chỉ bắt những cụm CHẮC CHẮN, thà bỏ sót còn hơn xoá nhầm thứ user đang cần. LLM vẫn có
+# thể tự điền "__clear__" cho các cách nói lạ — code ở đây chỉ CỘNG THÊM, không thay thế.
+_CLEAR_CUES = (
+    "khong can", "khong xet", "khong quan trong", "khong quan tam", "khong yeu cau",
+    "khong gioi han", "khong nhat thiet", "bo qua", "bo gioi han", "bo yeu cau",
+    "nao cung duoc", "gi cung duoc", "the nao cung duoc", "sao cung duoc", "mien la",
+)
+
+# Từ khoá nhận trục. CỐ TÌNH hẹp: "nam"/"nu"/"co" bỏ dấu trùng với "năm"/"nữa"/"có" nên
+# tuyệt đối không dùng làm khoá — "5 nam kinh nghiem" mà xoá mất giới tính là hỏng nặng.
+_AXIS_KEYWORDS = {
+    "schedule": ("lich", "khung gio", "gio hoc", "ngay hoc", "buoi hoc", "thoi gian hoc"),
+    "price": ("hoc phi", "ngan sach", "muc gia", "gia ca", "gia tien", "han gia", "gia nao"),
+    "gender": ("gioi tinh", "thay hay co", "nam hay nu", "thay giao", "co giao"),
+}
+
+_AXIS_FIELDS = {
+    # Lịch là MỘT CỤM: xoá ngày mà giữ khung giờ thì vẫn còn lọc theo giờ, user tưởng đã
+    # bỏ hết ràng buộc lịch nhưng thực tế vẫn bị chặn (đúng lỗi đã gặp khi test tay).
+    "schedule": ("available_days", "available_days_match", "available_from", "available_to"),
+    "price": ("min_rate", "max_rate"),
+    "gender": ("tutor_gender",),
+}
+
+_CLEAR_SENTINEL = "__clear__"
+_CLAUSE_SPLIT_RE = re.compile(r"[,.;\n]")
+
+
+def _no_accent(text: str) -> str:
+    out = "".join(c for c in unicodedata.normalize("NFD", text or "")
+                  if unicodedata.category(c) != "Mn").lower()
+    return out.replace("đ", "d")
+
+
+def _fix_clears(filters: dict, message: str) -> dict:
+    """Điền "__clear__" cho trục mà user vừa nói là bỏ.
+
+    Xét theo TỪNG MỆNH ĐỀ (tách bởi dấu phẩy/chấm): "bỏ giới hạn giá, tìm cô giáo" —
+    nếu quét cả câu thì cụm "bỏ" ở vế đầu sẽ xoá luôn giới tính ở vế sau.
+    """
+    if not message:
+        return filters
+    for clause in _CLAUSE_SPLIT_RE.split(_no_accent(message)):
+        if not any(cue in clause for cue in _CLEAR_CUES):
+            continue
+        for axis, keywords in _AXIS_KEYWORDS.items():
+            if any(k in clause for k in keywords):
+                for field in _AXIS_FIELDS[axis]:
+                    filters[field] = _CLEAR_SENTINEL
+    return filters
+
+
 def _fix_grade(filters: dict, message: str, grades: list[dict]) -> dict:
     """Chốt grade_level_id từ tin nhắn gốc khi user nêu lớp tường minh.
     """
@@ -229,12 +306,24 @@ def _fix_grade(filters: dict, message: str, grades: list[dict]) -> dict:
     num = m.group(1) or m.group(3)
     if not num:
         return filters
+    # Nhánh "số đứng đầu câu" (group 3) chỉ dành cho câu TRẢ LỜI CỤT khi bot vừa hỏi lớp
+    # mấy ("11", "11 nhé"). Câu dài bắt đầu bằng số thì con số đó thường không phải lớp:
+    # "2 người đó tôi không thấy chứng chỉ..." từng bị hiểu thành lớp 2, đổi luôn lớp đang
+    # tìm mà user không hề yêu cầu.
+    if m.group(3) and not m.group(1) and len(message.split()) > 4:
+        return filters
     want = f"lớp {int(num)}"
     for g in grades:
         if (g.get("gradeName") or "").strip().lower() == want:
             filters["grade_level_id"] = g.get("gradeLevelId")
             break
     return filters
+
+
+# Từ khoá cho thấy user chấp nhận CHỈ MỘT trong các ngày. Không có mấy từ này mà user
+# liệt kê ≥2 thứ cụ thể ("T7 và CN") thì mặc định là đòi ĐỦ cả các ngày đó.
+_ANY_DAY_HINTS = ("hoặc", "hoac", " hay ", "đều được", "deu duoc",
+                  "nào cũng", "nao cung", "một trong", "mot trong")
 
 
 def _fix_days(filters: dict, message: str) -> dict:
@@ -248,4 +337,28 @@ def _fix_days(filters: dict, message: str) -> dict:
     found = sorted({code for words, code in _DAY_WORDS if any(w in msg for w in words)})
     if found and filters.get("available_days") != found:
         filters["available_days"] = found
+    return filters
+
+
+def _fix_days_match(filters: dict, message: str) -> dict:
+    """Chốt "all" hay "any" bằng CODE khi user liệt kê thứ tường minh.
+
+    Đây là ranh giới giữa hai yêu cầu khác hẳn nhau ("rảnh cả T7 và CN" vs "rảnh cuối
+    tuần"), và đoán sai thì kết quả sai mà không có dấu hiệu gì — nên không phó mặc cho
+    LLM. Vẫn để LLM lo mấy cụm mơ hồ ("cuối tuần") vì chúng không có thứ tường minh.
+    """
+    if not message or not filters.get("available_days"):
+        return filters
+    msg = message.lower()
+    found = {code for words, code in _DAY_WORDS if any(w in msg for w in words)}
+    if len(found) < 2:
+        # 1 ngày thì "all" hay "any" cũng như nhau — để nguyên, khỏi tạo state thừa.
+        return filters
+    # CHỈ xét "hoặc/hay/đều được" trong MỆNH ĐỀ có nói tới thứ. Bug thật 2026-09-02:
+    # "rảnh được t7 và CN, ... kinh nghiệm giảng dạy ở UK HOẶC trung quốc" — chữ "hoặc" nằm
+    # ở vế nói về quốc gia, quét cả câu thì lịch bị hạ thành "một trong hai ngày".
+    day_clauses = [c for c in _CLAUSE_SPLIT_RE.split(msg)
+                   if any(w in c for words, _ in _DAY_WORDS for w in words)]
+    scope = " ".join(day_clauses) if day_clauses else msg
+    filters["available_days_match"] = "any" if any(h in scope for h in _ANY_DAY_HINTS) else "all"
     return filters

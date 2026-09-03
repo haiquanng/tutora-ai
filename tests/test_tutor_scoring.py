@@ -41,3 +41,41 @@ def test_co_query_rating_cao_van_co_the_thang_similarity_thap_hon_chut():
 def test_experience_score_khong_am_va_bounded():
     assert score_tutor(average_rating=4.5, total_reviews=10, completed_hours=0) > 0
     assert score_tutor(average_rating=4.5, total_reviews=10, completed_hours=10_000) <= 1.0
+
+
+# ─────────── Chuẩn hoá similarity trong pool ───────────
+
+def test_khop_ngu_nghia_vuot_troi_khong_bi_kinh_nghiem_dim():
+    """Bug thật 2026-09-02: user tìm "tốt nghiệp Nottingham, dạy ở UK/Trung Quốc".
+    Người DUY NHẤT đúng hồ sơ có similarity 0.807 (cao nhất pool) nhưng 0 giờ dạy, thua
+    người similarity 0.712 có 300 giờ — xếp CUỐI, không được gợi ý.
+
+    Nguyên nhân: cosine nằm dải hẹp (~0.65–0.85) còn rating/kinh nghiệm trải gần trọn
+    0–1, đem so trực tiếp là so hai thang khác nhau.
+    """
+    # Điểm với similarity THÔ — tái hiện lỗi.
+    khanh_raw = score_tutor(similarity=0.8071, average_rating=0, total_reviews=0,
+                            completed_hours=0, specific_query=True)
+    thuy_raw = score_tutor(similarity=0.7117, average_rating=4.1, total_reviews=55,
+                           completed_hours=300, specific_query=True)
+    assert khanh_raw < thuy_raw, "tái hiện: similarity thô thì người khớp nhất vẫn thua"
+
+    # Sau khi chuẩn hoá trong pool (0.807 -> 1.0, 0.712 -> 0.0).
+    khanh_norm = score_tutor(similarity=1.0, average_rating=0, total_reviews=0,
+                             completed_hours=0, specific_query=True)
+    thuy_norm = score_tutor(similarity=0.0, average_rating=4.1, total_reviews=55,
+                            completed_hours=300, specific_query=True)
+    assert khanh_norm > thuy_norm, "khớp vượt trội phải thắng"
+
+
+def test_pool_khong_phan_biet_duoc_thi_nhuong_chat_luong():
+    """Spread nhỏ = ai cũng na ná; chuẩn hoá lúc đó chỉ khuếch đại nhiễu embedding thành
+    0 vs 1. Khi đó cả pool nhận cùng một giá trị, để rating/kinh nghiệm quyết."""
+    from app.services.tutoring_shared.matching import _SIM_SPREAD_MIN
+
+    assert _SIM_SPREAD_MIN > 0
+    moi = score_tutor(similarity=0.5, average_rating=0, total_reviews=0,
+                      completed_hours=0, specific_query=True)
+    ky_cuu = score_tutor(similarity=0.5, average_rating=4.8, total_reviews=120,
+                         completed_hours=500, specific_query=True)
+    assert ky_cuu > moi

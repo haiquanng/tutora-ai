@@ -23,6 +23,10 @@ class HandlerContext:
     # Entity memory: gia sư đã hiển thị các lượt trước (FE giữ & gửi lại). Dùng để hiểu
     # "thầy A"/"người đầu tiên" trỏ về ai, và làm tập trắng chống bịa gia sư không tồn tại.
     shown_tutors: list = field(default_factory=list)
+    # Mong muốn mềm tích luỹ từ các lượt TRƯỚC (chưa gộp phần router vừa trích ở lượt này).
+    # Xếp hạng phải dùng NGUYÊN VĂN tin nhắn hiện tại + cái này, KHÔNG dùng bản LLM diễn
+    # giải lại lời user — xem _rank_query trong handlers/tutor.py.
+    prior_preferences: str | None = None
 
 
 class BaseHandler(ABC):
