@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     rag_top_k: int = 3
     rag_embedding_dim: int = 768
     env: str = "development"
-    solve_model: str = "gemini-2.5-pro"
+    solve_model: str = "gemini-3.6-flash"
     solve_thinking_model: str = "gemini-2.5-flash-lite"
     dotnet_be_url: str = "http://localhost:5166"
 
