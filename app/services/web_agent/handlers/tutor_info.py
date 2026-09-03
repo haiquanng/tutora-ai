@@ -6,8 +6,10 @@ Bài toán chuẩn: coreference resolution + grounding.
   - Coreference: "thầy A"/"cô kia"/"người đầu tiên" đều trỏ về 1 tutor_id. LLM không có
     state giữa các lượt, và history chỉ mang text reply (không có tutor_id của card) →
     phải có ENTITY MEMORY: ctx.shown_tutors do FE giữ và gửi lại mỗi lượt.
-  - Grounding: dữ liệu lấy THẲNG từ tutor_profiles rồi mới đưa LLM diễn đạt. LLM không
-    được tự nhớ/tự suy ra thông tin gia sư — đó là đường dẫn tới bịa.
+  - Grounding: dữ liệu lấy từ API .NET công khai (/tutors/{id}/full-profile + /schedule)
+    rồi mới đưa LLM diễn đạt. LLM không được tự nhớ/tự suy ra thông tin gia sư — đó là
+    đường dẫn tới bịa. Dùng API thay vì query DB thẳng để mượn luôn rule hiển thị công
+    khai của .NET và nói cùng dữ liệu với trang /tutor-detail (xem tutoring_shared/tutor_api.py).
 """
 from __future__ import annotations
 
@@ -18,8 +20,9 @@ from google.genai import types
 
 from ..schemas import WebChatResponse
 from ..handlers.base import BaseHandler, HandlerContext
-from ....core.dependencies import get_supabase, get_gemini_client
+from ....core.dependencies import get_gemini_client
 from ...telemetry.usage import track
+from ...tutoring_shared.tutor_api import get_full_profile, get_schedule
 
 _MODEL = "gemini-2.5-flash-lite"
 
@@ -39,6 +42,25 @@ def _strip_accents(s: str) -> str:
     return out.replace("đ", "d")
 
 
+def _mentions(text: str, tutor) -> bool:
+    """Tên gia sư có xuất hiện trong đoạn text (đã bỏ dấu) không — khớp cả tên gọi tắt."""
+    name = _strip_accents(getattr(tutor, "name", "") or "")
+    if not name:
+        return False
+    parts = name.split()
+    for n in (len(parts), 2, 1):
+        if n < 1 or len(parts) < n:
+            continue
+        tail = " ".join(parts[-n:])
+        if len(tail) >= 2 and re.search(rf"\b{re.escape(tail)}\b", text):
+            return True
+    return False
+
+
+def _count_mentions(text: str, shown: list) -> int:
+    return sum(1 for t in shown if _mentions(text, t))
+
+
 def _focus_from_history(history: list[dict], shown: list) -> object | None:
     """Gia sư đang được NÓI TỚI trong mạch hội thoại (discourse focus).
 
@@ -49,6 +71,13 @@ def _focus_from_history(history: list[dict], shown: list) -> object | None:
     for m in reversed(history or []):
         text = _strip_accents(m.get("content") or "")
         if not text:
+            continue
+        # Tin nhắn nhắc TỪ 2 GIA SƯ TRỞ LÊN thì tự nó đã mơ hồ, không thể là focus. Điển
+        # hình là câu phân định của chính bot: "Bạn muốn hỏi về A hay B ạ?" — quét thấy A
+        # trước rồi chốt luôn A, tức bot tự trả lời câu hỏi mà nó vừa đặt ra cho user.
+        # Bug thật 2026-09-02: user nói "2 người đó tôi không thấy chứng chỉ, muốn tìm
+        # người khác", bot lại đi kể chứng chỉ của đúng 1 trong 2 người đó.
+        if _count_mentions(text, shown) >= 2:
             continue
         for t in shown:
             name = _strip_accents(getattr(t, "name", "") or "")
@@ -112,7 +141,9 @@ def _resolve(message: str, shown: list, history: list[dict] | None = None) -> ob
 _DAY_NAMES = {1: "Thứ Hai", 2: "Thứ Ba", 3: "Thứ Tư", 4: "Thứ Năm",
               5: "Thứ Sáu", 6: "Thứ Bảy", 7: "Chủ Nhật"}
 
-# tutor_availability lưu giờ theo UTC
+# tutor_availability lưu giờ theo UTC — .NET trả nguyên si, FE tự đổi sang giờ local
+# (availSlotToLocal trong tutorDetail.service.ts). Ta đổi y hệt để bot nói cùng giờ với
+# trang /tutor-detail; sai chỗ này là hẹn nhầm giờ học, không phải lỗi hiển thị vặt.
 _VN_OFFSET_HOURS = 7
 
 
@@ -129,94 +160,127 @@ def _to_vn(hhmm: str | None) -> tuple[str, int]:
 
 
 def _slot_label(a: dict) -> str:
-    """1 khoảng rảnh → nhãn giờ VN. Nếu +7 làm sang ngày hôm sau thì đổi luôn tên thứ."""
-    dow = a.get("day_of_week_id")
+    """1 khoảng rảnh (TutorAvailabilityResponse) → nhãn giờ VN. Nếu +7 làm sang ngày hôm
+    sau thì đổi luôn tên thứ. KHÔNG dùng field dayName của .NET: nó tính theo giờ UTC nên
+    sai đúng ở các ca vắt qua nửa đêm."""
+    dow = a.get("dayofweek") or a.get("dayOfWeek")
     if not dow:
         return ""
-    start, carry = _to_vn(a.get("start_time"))
-    end, _ = _to_vn(a.get("end_time"))
+    start, carry = _to_vn(a.get("starttime") or a.get("startTime"))
+    end, _ = _to_vn(a.get("endtime") or a.get("endTime"))
     if not start or not end:
         return ""
     # vd 18:00 UTC Thứ Bảy → 01:00 Chủ Nhật (giờ VN).
-    day = _DAY_NAMES.get((dow + carry - 1) % 7 + 1, "")
+    day = _DAY_NAMES.get((int(dow) + carry - 1) % 7 + 1, "")
     return f"{day} {start}-{end}"
 
 
-def _load_profile(tutor_id: str) -> dict | None:
-    """Hồ sơ THẬT từ DB — nguồn duy nhất cho câu trả lời (grounding)."""
-    sb = get_supabase()
-    rows = (sb.table("tutor_profiles")
-            .select("tutor_id, headline, bio, education, degree, gpa, gpa_scale, experience, "
-                    "teaching_mode, teaching_area_city, average_rating, total_reviews, "
-                    "completed_hours, profile_status, is_public")
-            .eq("tutor_id", tutor_id).limit(1).execute().data or [])
-    if not rows:
+def _price_range(prices: list[dict]) -> tuple[float | None, float | None]:
+    amounts = [float(p["pricePerHour"]) for p in prices
+               if p.get("pricePerHour") is not None and p.get("isActive", True)]
+    return (min(amounts), max(amounts)) if amounts else (None, None)
+
+
+async def _load_profile(tutor_id: str) -> dict | None:
+    """Hồ sơ THẬT qua API .NET — nguồn duy nhất cho câu trả lời (grounding).
+
+    .NET trả 404 khi hồ sơ chưa duyệt / bị khóa / gia sư tắt nhận booking → get_full_profile
+    trả None và ta xin lỗi. KHÔNG tự check profile_status/is_public như bản đọc DB cũ:
+    rule hiển thị công khai thuộc về .NET, chép lại là chờ ngày lệch nhau.
+    """
+    p = await get_full_profile(tutor_id)
+    if not p:
         return None
-    p = rows[0]
-    if p.get("profile_status") != "active" or not p.get("is_public"):
-        return None
 
-    name = ""
-    u = (sb.table("users").select("full_name").eq("user_id", tutor_id).limit(1).execute().data or [])
-    if u:
-        name = u[0].get("full_name") or ""
+    prices = [x for x in (p.get("subjectGradePrices") or []) if x.get("isActive", True)]
+    subjects = sorted({x.get("subjectName") for x in prices if x.get("subjectName")})
+    grades = sorted({x.get("gradeLevelName") for x in prices if x.get("gradeLevelName")})
+    price_min, price_max = _price_range(prices)
 
-    prices = (sb.table("tutor_subject_grade_prices")
-              .select("subject_id, grade_level_id, price_per_hour, is_active")
-              .eq("tutor_id", tutor_id).eq("is_active", True).execute().data or [])
-    subj_ids = {r["subject_id"] for r in prices if r.get("subject_id")}
-    grade_ids = {r["grade_level_id"] for r in prices if r.get("grade_level_id")}
-    subjects = grades = []
-    if subj_ids:
-        subjects = [r["subject_name"] for r in (sb.table("subjects")
-                    .select("subject_id, subject_name").in_("subject_id", list(subj_ids))
-                    .execute().data or [])]
-    if grade_ids:
-        grades = [r["grade_name"] for r in (sb.table("grade_levels")
-                  .select("grade_level_id, grade_name").in_("grade_level_id", list(grade_ids))
-                  .execute().data or [])]
-    amounts = [float(r["price_per_hour"]) for r in prices if r.get("price_per_hour") is not None]
-
-    avail = (sb.table("tutor_availability")
-             .select("day_of_week_id, start_time, end_time")
-             .eq("tutor_id", tutor_id).execute().data or [])
+    # Lịch rảnh: ưu tiên bản TƯƠI từ /schedule (full-profile cache 20 phút — cùng lý do FE
+    # gọi riêng endpoint này). Lỗi thì dùng tạm bản trong full-profile, thà cũ còn hơn không.
+    avail = p.get("availabilities") or []
+    fresh = await get_schedule(tutor_id)
+    if fresh and fresh.get("availabilities"):
+        avail = fresh["availabilities"]
     slots = sorted({s for s in (_slot_label(a) for a in avail) if s})
 
-    p.update({"full_name": name, "subjects": subjects, "grades": grades,
-              "price_min": min(amounts) if amounts else None,
-              "price_max": max(amounts) if amounts else None,
-              "slots": slots})
+    # Chứng chỉ: .NET chỉ trả bản ĐÃ DUYỆT ở endpoint công khai → dùng được để trả lời
+    # "cô ấy có bằng gì" mà không sợ khoe bằng chưa xác minh.
+    certs = [c for c in (p.get("certificates") or []) if c.get("certificateName")]
+
+    p.update({
+        "subjects": subjects, "grades": grades,
+        "price_min": price_min, "price_max": price_max,
+        "slots": slots, "certificates": certs,
+    })
     return p
+
+
+def _cert_line(c: dict) -> str:
+    parts = [c.get("certificateName") or ""]
+    if c.get("issuingOrganization"):
+        parts.append(f'({c["issuingOrganization"]}')
+        parts[-1] += f', {c["yearIssued"]})' if c.get("yearIssued") else ')'
+    elif c.get("yearIssued"):
+        parts.append(f'({c["yearIssued"]})')
+    return " ".join(x for x in parts if x)
+
+
+def _review_line(f: dict) -> str:
+    """1 đánh giá → 1 dòng ngắn. Cắt comment để vài review dài không nuốt hết prompt."""
+    rating = f.get("rating")
+    comment = (f.get("comment") or "").strip().replace("\n", " ")
+    if not comment:
+        return ""
+    who = (f.get("fromUserName") or "").strip()
+    head = f"{rating}/5" if rating else "đánh giá"
+    return f'{head}{" — " + who if who else ""}: "{comment[:180]}"'
 
 
 def _facts_text(p: dict) -> str:
     """Chỉ liệt kê field CÓ dữ liệu — thiếu thì bỏ hẳn, để LLM không có cớ suy diễn."""
     L = []
     add = lambda k, v: L.append(f"- {k}: {v}") if v else None
-    add("Tên", p.get("full_name"))
+    add("Tên", p.get("fullName"))
     add("Giới thiệu ngắn", p.get("headline"))
     add("Học vấn", p.get("education"))
     add("Bằng cấp", p.get("degree"))
     if p.get("gpa"):
-        L.append(f"- GPA: {p['gpa']}/{p.get('gpa_scale') or 4}")
+        L.append(f"- GPA: {p['gpa']}/{p.get('gpaScale') or 4}")
+    certs = p.get("certificates") or []
+    if certs:
+        L.append("- Chứng chỉ (đã được Tutora xác minh): "
+                 + "; ".join(_cert_line(c) for c in certs[:6]))
     add("Môn dạy", ", ".join(p.get("subjects") or []))
     add("Khối lớp", ", ".join(p.get("grades") or []))
     mode = {"online": "Dạy online", "offline": "Dạy tại nhà",
-            "both": "Online và tại nhà"}.get(str(p.get("teaching_mode") or "").lower())
+            "both": "Online và tại nhà"}.get(str(p.get("teachingMode") or "").lower())
     add("Hình thức", mode)
-    add("Khu vực", p.get("teaching_area_city"))
+    area = ", ".join(x for x in [p.get("teachingAreaDistrict"), p.get("teachingAreaCity")] if x)
+    add("Khu vực", area)
     if p.get("price_min"):
         rng = (f'{int(p["price_min"]):,}đ/giờ' if p["price_min"] == p.get("price_max")
                else f'{int(p["price_min"]):,}–{int(p["price_max"]):,}đ/giờ')
         L.append(f"- Học phí: {rng}".replace(",", "."))
-    if p.get("total_reviews"):
-        L.append(f'- Đánh giá: {p.get("average_rating")}/5 từ {p["total_reviews"]} lượt')
+    total_fb = p.get("totalFeedbacks") or 0
+    if total_fb:
+        L.append(f'- Đánh giá: {p.get("averageRating")}/5 từ {total_fb} lượt')
     else:
         L.append("- Đánh giá: chưa có lượt đánh giá nào")
-    L.append(f'- Số giờ đã dạy: {p.get("completed_hours") or 0}')
-    add("Lịch rảnh", "; ".join(p.get("slots") or []))
+    L.append(f'- Số buổi đã dạy: {p.get("totalClassSessions") or 0}')
+    L.append(f'- Số học sinh đã dạy: {p.get("totalStudents") or 0}')
+    add("Lịch rảnh (giờ Việt Nam)", "; ".join(p.get("slots") or []))
+    add("Video giới thiệu", "có" if p.get("videoIntroUrl") else None)
     add("Kinh nghiệm (gia sư tự mô tả)", (p.get("experience") or "").strip()[:600])
     add("Mô tả bản thân (gia sư tự viết)", (p.get("bio") or "").strip()[:600])
+
+    # Nhận xét học viên — trích NGUYÊN VĂN vài cái gần nhất để trả lời "học viên nói gì".
+    # Đưa raw thay vì để LLM tự tóm tắt từ điểm số: tóm tắt cảm tính = mở đường cho bịa.
+    reviews = [r for r in (_review_line(f) for f in (p.get("feedbacks") or [])[:5]) if r]
+    if reviews:
+        L.append("- Nhận xét gần đây của học viên (nguyên văn):")
+        L += [f"    · {r}" for r in reviews]
     return "\n".join(L)
 
 
@@ -244,7 +308,7 @@ class TutorInfoHandler(BaseHandler):
                          "Cho mình biết tên để mình xem giúp nhé.")
             return WebChatResponse(reply=reply, intent="tutor_info", filters=ctx.filters)
 
-        profile = _load_profile(getattr(target, "tutor_id", ""))
+        profile = await _load_profile(getattr(target, "tutor_id", ""))
         if not profile:
             return WebChatResponse(reply=_NOT_FOUND, intent="tutor_info", filters=ctx.filters)
 
