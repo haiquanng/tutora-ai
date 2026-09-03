@@ -17,6 +17,7 @@ from __future__ import annotations
 # input / output / cached-input cho 1M token.
 # cached rẻ hơn input thường ~10 lần, phải tách vì prompt dài dùng cache nhiều.
 _PRICES: dict[str, tuple[float, float, float]] = {
+    "gemini-2.5-pro": (1.25, 10.00, 0.125),
     "gemini-2.5-flash": (0.30, 2.50, 0.03),
     "gemini-2.5-flash-lite": (0.10, 0.40, 0.01),
     # Embedding chỉ có chiều input.

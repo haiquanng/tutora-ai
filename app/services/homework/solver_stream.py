@@ -16,9 +16,12 @@ from ...utils.prompt import (
 )
 from .step_segmenter import segment_steps
 from ..telemetry import usage as usage_telemetry
+from ...core.config import get_settings
 
-_THINK_MODEL = "gemini-2.5-flash-lite"
-_SOLVE_MODEL = "gemini-2.5-flash"
+_settings = get_settings()
+
+_THINK_MODEL = _settings.solve_thinking_model
+_SOLVE_MODEL = _settings.solve_model
 
 _THINK_OPEN = "【SUY NGHĨ】"
 _THINK_CLOSE = "【HẾT SUY NGHĨ】"
